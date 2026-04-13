@@ -1,0 +1,117 @@
+# ------------------------------
+# OS / Editor
+# ------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ------------------------------
+# Python cache / tooling
+# ------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+.python-version
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/
+.ipynb_checkpoints/
+.pyre/
+.coverage
+.coverage.*
+htmlcov/
+
+# ------------------------------
+# Build / packaging
+# ------------------------------
+build/
+dist/
+.eggs/
+*.egg-info/
+pip-wheel-metadata/
+wheels/
+
+# ------------------------------
+# Virtual environments
+# ------------------------------
+.venv/
+venv/
+env/
+ENV/
+
+# ------------------------------
+# Logs / temp files
+# ------------------------------
+*.log
+*.tmp
+*.bak
+
+# ------------------------------
+# Training artifacts / checkpoints
+# ------------------------------
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.engine
+*.safetensors
+*.model
+*.pkl
+
+# ------------------------------
+# Numeric dumps / predictions
+# ------------------------------
+*.npy
+*.npz
+
+# ------------------------------
+# Medical images / dataset files
+# ------------------------------
+*.nii
+*.nii.gz
+*.mha
+*.mhd
+*.nrrd
+*.dcm
+
+# ------------------------------
+# Compressed datasets
+# ------------------------------
+*.zip
+*.7z
+*.tar
+*.tar.gz
+
+# ------------------------------
+# Project-specific generated data
+# ------------------------------
+data/exports/
+data/manifest/*.jsonl
+data/manifest/*.csv
+data/manifest/*.json
+data/manifest/*.pkl
+
+# ------------------------------
+# Project-specific output folders
+# ------------------------------
+src/segmoe_v2/SwinUNETR/runs/
+
+nnUNet_raw/
+nnUNet_preprocessed/
+nnUNet_results/
+
+nnFormer_data/
+nnFormer_preprocessed/
+nnFormer_results/
+nnFormer_raw_data/
+nnFormer_cropped_data/
+RESULTS_FOLDER/
