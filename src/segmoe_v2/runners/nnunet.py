@@ -134,6 +134,7 @@ class NnUNetResEncRunner(BaseRunner):
                     "channel_names": ("P_WG", "P_PZ", "P_TZ"),
                     "prob_path": str(Path(output_dir) / f"{case.case_id}.npz"),
                     "source_manifest_hash": str(experiment_cfg.get("source_manifest_hash", "")),
+                    "hierarchy_consistency_applied": True,
                     "command": command,
                 }
                 for case in cases

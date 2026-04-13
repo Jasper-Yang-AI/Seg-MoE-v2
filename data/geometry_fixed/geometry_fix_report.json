@@ -1,0 +1,96 @@
+{
+  "fixed_case_count": 62,
+  "fixed_case_ids": [
+    "NJMU1352914_N024",
+    "NJMU6538885_N092",
+    "NJMU6546174_N023",
+    "NJMU7750800_N152",
+    "NJMU8272917_N071",
+    "NJMU8324193_N060",
+    "NJMU8661534_N026",
+    "njmu_0006575555_N4998",
+    "njmu_0011005773_N4868",
+    "njmu_pca_N009",
+    "njmu_pca_N013",
+    "njmu_pca_N018",
+    "njmu_pca_N020",
+    "njmu_pca_N038",
+    "njmu_pca_N048",
+    "njmu_pca_N055",
+    "njmu_pca_N077",
+    "njmu_pca_N079",
+    "njmu_pca_N087",
+    "njmu_pca_N090",
+    "njmu_pca_N102",
+    "njmu_pca_N125",
+    "njmu_pca_N127",
+    "njmu_pca_N167",
+    "njmu_pca_N180",
+    "njmu_pca_N201",
+    "njmu_pca_N213",
+    "njmu_pca_N229",
+    "njmu_pca_N233",
+    "njmu_pca_N255",
+    "njmu_pca_N256",
+    "njmu_pca_N266",
+    "njmu_pca_N272",
+    "njmu_pca_N284",
+    "njmu_pca_N289",
+    "njmu_pca_N307",
+    "njmu_pca_N336",
+    "njmu_pca_N340",
+    "njmu_pca_N359",
+    "njmu_pca_N377",
+    "njmu_pca_N415",
+    "njmu_pca_N435",
+    "njmu_pca_N436",
+    "njmu_pca_N438",
+    "njmu_pca_N441",
+    "njmu_pca_N460",
+    "njmu_pca_N533",
+    "njmu_pca_N538",
+    "njmu_pca_N556",
+    "njmu_pca_N559",
+    "njmu_pca_N594",
+    "njmu_pca_N607",
+    "njmu_pca_N614",
+    "njmu_pca_N643",
+    "njmu_pca_N649",
+    "njmu_pca_N650",
+    "njmu_pca_N655",
+    "njmu_pca_N656",
+    "njmu_pca_N664",
+    "njmu_pca_N686",
+    "njmu_pca_N732",
+    "njmu_pca_N735"
+  ],
+  "recommendations_included": [
+    "header_harmonize_recommended",
+    "resample_required"
+  ],
+  "recommendation_counts": {
+    "header_harmonize_recommended": 52,
+    "resample_required": 10
+  },
+  "action_counts": {
+    "t2w": {
+      "copy": 62
+    },
+    "adc": {
+      "copy": 2,
+      "header_harmonize": 50,
+      "resample": 10
+    },
+    "dwi": {
+      "copy": 2,
+      "header_harmonize": 50,
+      "resample": 10
+    },
+    "label": {
+      "copy": 60,
+      "header_harmonize": 2
+    }
+  },
+  "output_root": "data\\geometry_fixed",
+  "manifest_out": "data\\manifest\\cases.geometry_fixed.jsonl"
+}

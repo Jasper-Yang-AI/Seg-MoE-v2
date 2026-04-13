@@ -166,10 +166,17 @@ Run planning and preprocessing for `3d_fullres`:
 python -m nnunetv2.experiment_planning.plan_and_preprocess_entrypoints `
   -d 501 `
   --verify_dataset_integrity `
+  --clean `
+  -pl nnUNetPlannerResEncM `
   -c 3d_fullres `
   -npfp 8 `
   -np 4
 ```
+
+This is important: the training command below uses `-p nnUNetResEncUNetMPlans`, so
+you must generate the matching plans file with `-pl nnUNetPlannerResEncM`.
+If you only run the default planner, you will get `nnUNetPlans.json` but not
+`nnUNetResEncUNetMPlans.json`, and training will fail with `FileNotFoundError`.
 
 Train anatomy `fold 0` with the custom trainer:
 
@@ -183,12 +190,27 @@ python -m nnunetv2.run.run_training `
   --npz
 ```
 
+The anatomy trainer now applies the full SegMoE-v2 anatomy rule set:
+
+- inputs are `T2W + ADC + DWI`
+- `WG/PZ/TZ` are implemented as three independent sigmoid heads
+- `T2` is never dropped
+- `ADC/DWI` use independent modality dropout with default `p=0.35`
+- a `T2-only` branch is trained with probability-space consistency regularization
+- `lambda_consistency=0.2` with a `10 epoch` linear warm-up
+- consistency is masked out on `label==3` voxels
+- exported probabilities are postprocessed with hierarchy consistency:
+  - `P_PZ <= P_WG`
+  - `P_TZ <= P_WG`
+  - `P_PZ + P_TZ <= P_WG`
+
 This validation path is probability-first. It writes anatomy probabilities, not
 hard masks, into the fold validation folder:
 
 - channel order: `P_WG`, `P_PZ`, `P_TZ`
 - main artifact: `.npz`
 - sidecar metadata: `prediction_manifest.jsonl`
+- exported probabilities already include hierarchy-consistency postprocessing
 
 If you later want to rerun only fold-0 validation probability export:
 
@@ -265,6 +287,37 @@ python -m segmoe_v2.cli.main audit-geometry `
 
 This step is useful to decide whether you can train directly, only need mild
 header harmonization, or need real pre-training resampling/alignment.
+
+## Anatomy Visual QC
+
+Before promoting anatomy priors into lesion `layer1`, generate a small visual
+QC pack from exported anatomy probabilities.
+
+Example:
+
+```powershell
+python -m segmoe_v2.cli.main visualize-anatomy-qc `
+  --manifest data\manifest\cases.geometry_fixed.jsonl `
+  --prediction-manifest nnUNet_results\Dataset501_ProstateAnatomy\nnUNetTrainerSegMoEAnatomy__nnUNetResEncUNetMPlans__3d_fullres\fold_0\validation\prediction_manifest.jsonl `
+  --output-dir data\qc\anatomy_fold0
+```
+
+Default sampling is:
+
+- `5` normal trainval cases
+- `3` lesion cases
+- `2` geometry-fixed cases
+
+Outputs:
+
+- overlay PNGs with `T2W + P_WG/P_PZ/P_TZ`
+- `selection_summary.json`
+
+Use this QC step to verify:
+
+- `PZ/TZ` do not obviously leak outside gland
+- `WG` is not hollowed out by lesion voxels
+- lesion-adjacent `PZ/TZ` are still anatomically plausible
 
 ## Geometry Fix To T2
 

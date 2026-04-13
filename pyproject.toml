@@ -16,6 +16,7 @@ dependencies = [
   "scipy>=1.11",
   "torch>=2.0",
   "nibabel>=5.0",
+  "Pillow>=10.0",
 ]
 
 [project.optional-dependencies]

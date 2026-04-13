@@ -11,6 +11,10 @@ import torch.nn.functional as F
 
 ANATOMY_HEADS: tuple[str, str, str] = ("WG", "PZ", "TZ")
 ANATOMY_PROBABILITY_CHANNELS: tuple[str, str, str] = ("P_WG", "P_PZ", "P_TZ")
+ANATOMY_REGION_KEYS: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]] = ((1, 2, 3), (1,), (2,))
+T2W_CHANNEL_INDEX = 0
+ADC_CHANNEL_INDEX = 1
+DWI_CHANNEL_INDEX = 2
 
 
 def _insert_crop_into_image(
@@ -43,6 +47,97 @@ def build_anatomy_head_targets_torch(target: torch.Tensor) -> tuple[torch.Tensor
     stacked_targets = torch.stack((wg_target, pz_target, tz_target), dim=1)
     stacked_valid = torch.stack((wg_valid, pz_valid, tz_valid), dim=1)
     return stacked_targets, stacked_valid
+
+
+def build_anatomy_consistency_valid_mask_torch(
+    raw_target: torch.Tensor,
+    *,
+    num_heads: int = len(ANATOMY_HEADS),
+    mask_lesion: bool = True,
+) -> torch.Tensor:
+    target = _squeeze_segmentation_channel(raw_target).long()
+    valid = torch.ones_like(target, dtype=torch.bool)
+    if mask_lesion:
+        valid = target != 3
+    return valid.unsqueeze(1).expand(-1, int(num_heads), *valid.shape[1:])
+
+
+def apply_anatomy_modality_dropout(
+    data: torch.Tensor,
+    *,
+    adc_dropout_p: float = 0.35,
+    dwi_dropout_p: float = 0.35,
+    training: bool = True,
+) -> torch.Tensor:
+    data = data.clone()
+    if (not training) or data.ndim < 2:
+        return data
+
+    batch_size = int(data.shape[0])
+    mask_shape = (batch_size, 1, *([1] * max(0, data.ndim - 2)))
+
+    def _apply_channel_dropout(channel_index: int, dropout_p: float) -> None:
+        if channel_index >= data.shape[1] or dropout_p <= 0.0:
+            return
+        if dropout_p >= 1.0:
+            data[:, channel_index : channel_index + 1] = 0
+            return
+        keep = (torch.rand(mask_shape, device=data.device) >= float(dropout_p)).to(data.dtype)
+        data[:, channel_index : channel_index + 1] = data[:, channel_index : channel_index + 1] * keep
+
+    _apply_channel_dropout(ADC_CHANNEL_INDEX, adc_dropout_p)
+    _apply_channel_dropout(DWI_CHANNEL_INDEX, dwi_dropout_p)
+    return data
+
+
+def build_t2_only_input(data: torch.Tensor) -> torch.Tensor:
+    out = data.clone()
+    if out.ndim >= 2:
+        if ADC_CHANNEL_INDEX < out.shape[1]:
+            out[:, ADC_CHANNEL_INDEX : ADC_CHANNEL_INDEX + 1] = 0
+        if DWI_CHANNEL_INDEX < out.shape[1]:
+            out[:, DWI_CHANNEL_INDEX : DWI_CHANNEL_INDEX + 1] = 0
+    return out
+
+
+def anatomy_consistency_weight(
+    *,
+    current_epoch: int,
+    base_lambda: float = 0.2,
+    warmup_epochs: int = 10,
+) -> float:
+    base_lambda = float(base_lambda)
+    warmup_epochs = int(warmup_epochs)
+    current_epoch = int(current_epoch)
+    if base_lambda <= 0.0:
+        return 0.0
+    if warmup_epochs <= 0:
+        return base_lambda
+    scale = min(max(float(current_epoch), 0.0) / float(warmup_epochs), 1.0)
+    return base_lambda * scale
+
+
+def anatomy_consistency_loss(
+    full_logits: torch.Tensor,
+    t2_only_logits: torch.Tensor,
+    raw_target: torch.Tensor,
+    *,
+    mask_lesion: bool = True,
+) -> torch.Tensor:
+    if full_logits.shape != t2_only_logits.shape:
+        raise ValueError(
+            f"Expected matching logit shapes, got full={tuple(full_logits.shape)} and t2_only={tuple(t2_only_logits.shape)}"
+        )
+    full_probs = torch.sigmoid(full_logits).detach()
+    t2_only_probs = torch.sigmoid(t2_only_logits)
+    valid = build_anatomy_consistency_valid_mask_torch(
+        raw_target,
+        num_heads=int(full_logits.shape[1]),
+        mask_lesion=mask_lesion,
+    ).to(full_logits.dtype)
+    losses = F.mse_loss(t2_only_probs, full_probs, reduction="none") * valid
+    denominator = valid.sum().clamp_min(1.0)
+    return losses.sum() / denominator
 
 
 def masked_binary_dice_loss(
@@ -114,10 +209,10 @@ class MaskedAnatomySegLoss(torch.nn.Module):
         return total
 
 
-def anatomy_tp_fp_fn(
+def anatomy_tp_fp_fn_tn(
     logits: torch.Tensor,
     raw_target: torch.Tensor,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     targets, valid_mask = build_anatomy_head_targets_torch(raw_target)
     probs = torch.sigmoid(logits)
     predicted = probs > 0.5
@@ -128,11 +223,53 @@ def anatomy_tp_fp_fn(
     tp = ((predicted & targets_bool) & valid).sum(dim=spatial_axes)
     fp = ((predicted & (~targets_bool)) & valid).sum(dim=spatial_axes)
     fn = (((~predicted) & targets_bool) & valid).sum(dim=spatial_axes)
+    tn = (((~predicted) & (~targets_bool)) & valid).sum(dim=spatial_axes)
 
     tp_sum = tp.sum(dim=0).detach().cpu().numpy().astype(np.float64)
     fp_sum = fp.sum(dim=0).detach().cpu().numpy().astype(np.float64)
     fn_sum = fn.sum(dim=0).detach().cpu().numpy().astype(np.float64)
+    tn_sum = tn.sum(dim=0).detach().cpu().numpy().astype(np.float64)
+    return tp_sum, fp_sum, fn_sum, tn_sum
+
+
+def anatomy_tp_fp_fn(
+    logits: torch.Tensor,
+    raw_target: torch.Tensor,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    tp_sum, fp_sum, fn_sum, _ = anatomy_tp_fp_fn_tn(logits, raw_target)
     return tp_sum, fp_sum, fn_sum
+
+
+def build_anatomy_validation_summary(
+    metric_per_case: Sequence[dict[str, Any]],
+    *,
+    channel_names: Sequence[str] = ANATOMY_PROBABILITY_CHANNELS,
+    region_keys: Sequence[tuple[int, ...]] = ANATOMY_REGION_KEYS,
+) -> dict[str, Any]:
+    if len(metric_per_case) == 0:
+        raise ValueError("metric_per_case must not be empty")
+
+    first_metrics = metric_per_case[0]["metrics"]
+    metric_names = list(first_metrics[region_keys[0]].keys())
+    mean: dict[tuple[int, ...], dict[str, float]] = {}
+    for region_key in region_keys:
+        region_metrics: dict[str, float] = {}
+        for metric_name in metric_names:
+            region_metrics[metric_name] = float(np.nanmean([case["metrics"][region_key][metric_name] for case in metric_per_case]))
+        mean[region_key] = region_metrics
+
+    foreground_mean: dict[str, float] = {}
+    for metric_name in metric_names:
+        foreground_mean[metric_name] = float(np.nanmean([mean[region_key][metric_name] for region_key in region_keys]))
+
+    return {
+        "metric_per_case": list(metric_per_case),
+        "mean": mean,
+        "foreground_mean": foreground_mean,
+        "channel_names": [str(name) for name in channel_names],
+        "region_order": [list(region) for region in region_keys],
+        "metric_source": "anatomy_head_masks",
+    }
 
 
 def deep_supervision_weights(
@@ -150,6 +287,31 @@ def deep_supervision_weights(
         weights[-1] = 0.0
     weights = weights / weights.sum()
     return weights
+
+
+def enforce_anatomy_probability_hierarchy(
+    probabilities: np.ndarray,
+    *,
+    eps: float = 1e-6,
+) -> np.ndarray:
+    probabilities = np.asarray(probabilities, dtype=np.float32).copy()
+    if probabilities.ndim < 1 or probabilities.shape[0] != len(ANATOMY_PROBABILITY_CHANNELS):
+        raise ValueError(
+            f"Expected probabilities with leading anatomy-head axis of length {len(ANATOMY_PROBABILITY_CHANNELS)}, "
+            f"got shape {probabilities.shape}"
+        )
+
+    wg = probabilities[0]
+    pz = np.minimum(probabilities[1], wg)
+    tz = np.minimum(probabilities[2], wg)
+    pz_tz_sum = pz + tz
+    scale = np.ones_like(wg, dtype=np.float32)
+    over_mask = pz_tz_sum > wg
+    scale[over_mask] = wg[over_mask] / np.maximum(pz_tz_sum[over_mask], float(eps))
+
+    probabilities[1] = pz * scale
+    probabilities[2] = tz * scale
+    return probabilities
 
 
 def _resample_logits_to_cropped_shape(
@@ -199,7 +361,7 @@ def convert_anatomy_logits_to_probabilities_with_correct_shape(
             properties_dict["bbox_used_for_cropping"],
         )
     reverted = reverted.transpose([0] + [axis + 1 for axis in plans_manager.transpose_backward])
-    return reverted
+    return enforce_anatomy_probability_hierarchy(reverted)
 
 
 def anatomy_hard_masks_from_probabilities(probabilities: np.ndarray) -> np.ndarray:

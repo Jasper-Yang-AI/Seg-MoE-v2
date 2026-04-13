@@ -581,12 +581,13 @@ class nnUNetPredictor(object):
             t = Thread(target=producer, args=(data, slicers, queue))
             t.start()
 
-            # preallocate arrays
+            # preallocate spatial accumulator eagerly but infer the channel count from the
+            # first actual network prediction. Some custom trainers intentionally decouple
+            # the network heads from dataset label semantics (for example 3 anatomy heads
+            # learned from a 4-label supervision map), so relying on label_manager here can
+            # over-allocate and crash during accumulation.
             if self.verbose:
                 print(f'preallocating results arrays on device {results_device}')
-            predicted_logits = torch.zeros((self.label_manager.num_segmentation_heads, *data.shape[1:]),
-                                           dtype=torch.half,
-                                           device=results_device)
             n_predictions = torch.zeros(data.shape[1:], dtype=torch.half, device=results_device)
 
             if self.use_gaussian:
@@ -607,6 +608,16 @@ class nnUNetPredictor(object):
                         break
                     workon, sl = item
                     prediction = self._internal_maybe_mirror_and_predict(workon)[0].to(results_device)
+
+                    if predicted_logits is None:
+                        predicted_logits = torch.zeros((prediction.shape[0], *data.shape[1:]),
+                                                       dtype=torch.half,
+                                                       device=results_device)
+                    elif predicted_logits.shape[0] != prediction.shape[0]:
+                        raise RuntimeError(
+                            f'Inconsistent number of prediction channels across sliding-window tiles. '
+                            f'Expected {predicted_logits.shape[0]}, got {prediction.shape[0]}'
+                        )
 
                     if self.use_gaussian:
                         prediction *= gaussian

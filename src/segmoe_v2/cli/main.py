@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 from typing import Sequence
 
+from ..anatomy_visual_qc import generate_anatomy_visual_qc
 from ..backend_data import export_nnformer_task, export_nnunet_task, prepare_swinunetr_data
 from ..geometry_audit import (
     GeometryAuditThresholds,
@@ -105,6 +106,15 @@ def build_parser() -> argparse.ArgumentParser:
     geometry_fix.add_argument("--soft-direction", type=float, default=1e-4)
     geometry_fix.add_argument("--hard-direction", type=float, default=1e-3)
     geometry_fix.add_argument("--overwrite", action="store_true")
+
+    anatomy_qc = sub.add_parser("visualize-anatomy-qc", help="Generate anatomy visual QC overlays from exported probabilities")
+    anatomy_qc.add_argument("--manifest", required=True)
+    anatomy_qc.add_argument("--prediction-manifest", required=True)
+    anatomy_qc.add_argument("--output-dir", required=True)
+    anatomy_qc.add_argument("--normal-count", type=int, default=5)
+    anatomy_qc.add_argument("--lesion-count", type=int, default=3)
+    anatomy_qc.add_argument("--geometry-fix-count", type=int, default=2)
+    anatomy_qc.add_argument("--seed", type=int, default=42)
 
     return parser
 
@@ -238,6 +248,22 @@ def main(argv: Sequence[str] | None = None) -> None:
         print(f"  manifest_out: {outputs['manifest']}")
         print(f"  report_csv_out: {outputs['report_csv']}")
         print(f"  report_json_out: {outputs['report_json']}")
+        return
+
+    if args.command == "visualize-anatomy-qc":
+        from ..io_utils import load_jsonl
+
+        summary = generate_anatomy_visual_qc(
+            rows,
+            prediction_manifest=load_jsonl(args.prediction_manifest),
+            output_dir=args.output_dir,
+            normal_count=int(args.normal_count),
+            lesion_count=int(args.lesion_count),
+            geometry_fix_count=int(args.geometry_fix_count),
+            seed=int(args.seed),
+        )
+        print(f"Anatomy QC overlays written to {Path(args.output_dir)}")
+        print(f"  actual_counts: {summary['actual_counts']}")
         return
 
     raise SystemExit(f"Unsupported command: {args.command}")

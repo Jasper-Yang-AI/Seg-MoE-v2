@@ -99,6 +99,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 "channel_names": list(ANATOMY_PROBABILITY_CHANNELS),
                 "prob_path": str(prob_path),
                 "source_manifest_hash": str(predictor.dataset_json.get("segmoe_source_manifest_hash", "")),
+                "hierarchy_consistency_applied": True,
             }
         )
 

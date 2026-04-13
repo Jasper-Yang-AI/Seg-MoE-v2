@@ -11,6 +11,7 @@ from batchgenerators.utilities.file_and_folder_operations import join, maybe_mkd
 from torch import autocast
 
 from nnunetv2.configuration import default_num_processes
+from nnunetv2.evaluation.evaluate_predictions import save_summary_json
 from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
 from nnunetv2.training.dataloading.nnunet_dataset import infer_dataset_class
 from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
@@ -19,8 +20,15 @@ from nnunetv2.utilities.helpers import dummy_context
 from nnunetv2.utilities.label_handling.label_handling import convert_labelmap_to_one_hot, determine_num_input_channels
 from segmoe_v2.nnunet_anatomy import (
     ANATOMY_PROBABILITY_CHANNELS,
+    ANATOMY_REGION_KEYS,
     MaskedAnatomySegLoss,
+    anatomy_consistency_loss,
+    anatomy_consistency_weight,
     anatomy_tp_fp_fn,
+    anatomy_tp_fp_fn_tn,
+    apply_anatomy_modality_dropout,
+    build_anatomy_validation_summary,
+    build_t2_only_input,
     convert_anatomy_logits_to_probabilities_with_correct_shape,
     deep_supervision_weights,
     write_anatomy_prediction_manifest,
@@ -31,6 +39,25 @@ from segmoe_v2.nnunet_anatomy import (
 class nnUNetTrainerSegMoEAnatomy(nnUNetTrainer):
     head_channel_names = ANATOMY_PROBABILITY_CHANNELS
     head_loss_weights: Tuple[float, float, float] = (1.0, 1.0, 1.0)
+    custom_logger_keys: Tuple[str, str, str] = (
+        "train_supervised_losses",
+        "train_consistency_losses",
+        "consistency_weights",
+    )
+    adc_dropout_p: float = 0.35
+    dwi_dropout_p: float = 0.35
+    lambda_consistency: float = 0.2
+    consistency_warmup_epochs: int = 10
+    consistency_mode: str = "prob_mse"
+    consistency_mask_lesion: bool = True
+
+    def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict, device: torch.device = torch.device("cuda")):
+        super().__init__(plans, configuration, fold, dataset_json, device)
+        self._ensure_custom_logger_keys()
+
+    def _ensure_custom_logger_keys(self) -> None:
+        for key in self.custom_logger_keys:
+            self.logger.my_fantastic_logging.setdefault(key, list())
 
     @staticmethod
     def build_network_architecture(
@@ -52,6 +79,7 @@ class nnUNetTrainerSegMoEAnatomy(nnUNetTrainer):
 
     def initialize(self):
         if not self.was_initialized:
+            self._ensure_custom_logger_keys()
             self._set_batch_size_and_oversample()
             self.num_input_channels = determine_num_input_channels(
                 self.plans_manager,
@@ -81,8 +109,47 @@ class nnUNetTrainerSegMoEAnatomy(nnUNetTrainer):
         else:
             raise RuntimeError("You have called self.initialize even though the trainer was already initialized.")
 
+    def load_checkpoint(self, filename_or_checkpoint):
+        super().load_checkpoint(filename_or_checkpoint)
+        self._ensure_custom_logger_keys()
+
     def _build_loss(self):
         return MaskedAnatomySegLoss(head_weights=self.head_loss_weights)
+
+    def _current_consistency_weight(self) -> float:
+        return anatomy_consistency_weight(
+            current_epoch=int(self.current_epoch),
+            base_lambda=float(self.lambda_consistency),
+            warmup_epochs=int(self.consistency_warmup_epochs),
+        )
+
+    def _prepare_training_inputs(self, data: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # `data` has already been normalized by nnUNet preprocessing at this point.
+        full_input = apply_anatomy_modality_dropout(
+            data,
+            adc_dropout_p=float(self.adc_dropout_p),
+            dwi_dropout_p=float(self.dwi_dropout_p),
+            training=True,
+        )
+        t2_only_input = build_t2_only_input(data)
+        return full_input, t2_only_input
+
+    def _compute_consistency_loss(self, full_output, t2_only_output, target) -> torch.Tensor:
+        if str(self.consistency_mode) != "prob_mse":
+            raise NotImplementedError(f"Unsupported anatomy consistency mode: {self.consistency_mode}")
+        full_logits, raw_target = self._extract_highres_output_and_target(full_output, target)
+        t2_only_logits, _ = self._extract_highres_output_and_target(t2_only_output, target)
+        return anatomy_consistency_loss(
+            full_logits,
+            t2_only_logits,
+            raw_target,
+            mask_lesion=bool(self.consistency_mask_lesion),
+        )
+
+    def _extract_highres_output_and_target(self, output, target) -> tuple[torch.Tensor, torch.Tensor]:
+        logits = output[0] if isinstance(output, (list, tuple)) else output
+        raw_target = target[0] if isinstance(target, list) else target
+        return logits, raw_target
 
     def _compute_loss(self, output, target):
         if isinstance(output, (list, tuple)):
@@ -106,10 +173,15 @@ class nnUNetTrainerSegMoEAnatomy(nnUNetTrainer):
         else:
             target = target.to(self.device, non_blocking=True)
 
+        full_input, t2_only_input = self._prepare_training_inputs(data)
         self.optimizer.zero_grad(set_to_none=True)
         with autocast(self.device.type, enabled=True) if self.device.type == "cuda" else dummy_context():
-            output = self.network(data)
-            loss = self._compute_loss(output, target)
+            full_output = self.network(full_input)
+            supervised_loss = self._compute_loss(full_output, target)
+            t2_only_output = self.network(t2_only_input)
+            consistency_loss = self._compute_consistency_loss(full_output, t2_only_output, target)
+            consistency_weight = self._current_consistency_weight()
+            loss = supervised_loss + float(consistency_weight) * consistency_loss
 
         if self.grad_scaler is not None:
             self.grad_scaler.scale(loss).backward()
@@ -121,7 +193,37 @@ class nnUNetTrainerSegMoEAnatomy(nnUNetTrainer):
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.network.parameters(), 12)
             self.optimizer.step()
-        return {"loss": loss.detach().cpu().numpy()}
+        return {
+            "loss": loss.detach().cpu().numpy(),
+            "supervised_loss": supervised_loss.detach().cpu().numpy(),
+            "consistency_loss": consistency_loss.detach().cpu().numpy(),
+            "consistency_weight": float(consistency_weight),
+        }
+
+    def on_train_epoch_end(self, train_outputs: List[dict]):
+        outputs = collate_outputs(train_outputs)
+
+        if self.is_ddp:
+            losses_tr = [None for _ in range(torch.distributed.get_world_size())]
+            torch.distributed.all_gather_object(losses_tr, outputs["loss"])
+            loss_here = np.vstack(losses_tr).mean()
+
+            supervised_tr = [None for _ in range(torch.distributed.get_world_size())]
+            torch.distributed.all_gather_object(supervised_tr, outputs["supervised_loss"])
+            supervised_here = np.vstack(supervised_tr).mean()
+
+            consistency_tr = [None for _ in range(torch.distributed.get_world_size())]
+            torch.distributed.all_gather_object(consistency_tr, outputs["consistency_loss"])
+            consistency_here = np.vstack(consistency_tr).mean()
+        else:
+            loss_here = np.mean(outputs["loss"])
+            supervised_here = np.mean(outputs["supervised_loss"])
+            consistency_here = np.mean(outputs["consistency_loss"])
+
+        self.logger.log("train_losses", loss_here, self.current_epoch)
+        self.logger.log("train_supervised_losses", supervised_here, self.current_epoch)
+        self.logger.log("train_consistency_losses", consistency_here, self.current_epoch)
+        self.logger.log("consistency_weights", float(np.mean(outputs["consistency_weight"])), self.current_epoch)
 
     def validation_step(self, batch: dict) -> dict:
         data = batch["data"].to(self.device, non_blocking=True)
@@ -199,9 +301,10 @@ class nnUNetTrainerSegMoEAnatomy(nnUNetTrainer):
         )
 
         manifest_records = []
+        metric_per_case = []
         for case_id in dataset_val.identifiers:
             self.print_to_log_file(f"predicting anatomy probabilities for {case_id}")
-            data, _, seg_prev, properties = dataset_val.load_case(case_id)
+            data, seg, seg_prev, properties = dataset_val.load_case(case_id)
             data = data[:]
 
             if self.is_cascaded and seg_prev is not None:
@@ -214,6 +317,39 @@ class nnUNetTrainerSegMoEAnatomy(nnUNetTrainer):
                 )
             with torch.inference_mode():
                 logits = predictor.predict_sliding_window_return_logits(torch.from_numpy(data)).cpu()
+
+            target = torch.from_numpy(np.asarray(seg))[None]
+            tp_hard, fp_hard, fn_hard, tn_hard = anatomy_tp_fp_fn_tn(logits[None], target)
+            case_metrics = {}
+            for channel_name, region_key, tp, fp, fn, tn in zip(
+                self.head_channel_names,
+                ANATOMY_REGION_KEYS,
+                tp_hard,
+                fp_hard,
+                fn_hard,
+                tn_hard,
+            ):
+                denominator = 2 * tp + fp + fn
+                iou_denominator = tp + fp + fn
+                case_metrics[region_key] = {
+                    "Dice": float(2 * tp / denominator) if denominator > 0 else float("nan"),
+                    "IoU": float(tp / iou_denominator) if iou_denominator > 0 else float("nan"),
+                    "FP": float(fp),
+                    "TP": float(tp),
+                    "FN": float(fn),
+                    "TN": float(tn),
+                    "n_pred": float(fp + tp),
+                    "n_ref": float(fn + tp),
+                }
+            metric_per_case.append(
+                {
+                    "reference_file": case_id,
+                    "prediction_file": str(Path(validation_output_folder) / f"{case_id}.npz") if save_probabilities else case_id,
+                    "metrics": case_metrics,
+                    "channel_names": list(self.head_channel_names),
+                }
+            )
+
             if save_probabilities:
                 probabilities = convert_anatomy_logits_to_probabilities_with_correct_shape(
                     logits,
@@ -237,6 +373,7 @@ class nnUNetTrainerSegMoEAnatomy(nnUNetTrainer):
                         "channel_names": list(self.head_channel_names),
                         "prob_path": str(prob_path),
                         "source_manifest_hash": str(self.dataset_json.get("segmoe_source_manifest_hash", "")),
+                        "hierarchy_consistency_applied": True,
                     }
                 )
         if save_probabilities and manifest_records:
@@ -252,9 +389,32 @@ class nnUNetTrainerSegMoEAnatomy(nnUNetTrainer):
                         "split": "val",
                         "channel_names": list(self.head_channel_names),
                         "case_count": len(manifest_records),
+                        "hierarchy_consistency_applied": True,
                     },
                     handle,
                     ensure_ascii=False,
                     indent=2,
                 )
+
+        summary = build_anatomy_validation_summary(
+            metric_per_case,
+            channel_names=self.head_channel_names,
+            region_keys=ANATOMY_REGION_KEYS,
+        )
+        save_summary_json(summary, join(validation_output_folder, "summary.json"))
+        self.print_to_log_file("Validation complete", also_print_to_console=True)
+        self.print_to_log_file("Validation Dice by head: ", [np.round(summary["mean"][region]["Dice"], decimals=4) for region in ANATOMY_REGION_KEYS],
+                               also_print_to_console=True)
+        self.print_to_log_file("Mean Validation Dice: ", np.round(summary["foreground_mean"]["Dice"], decimals=4),
+                               also_print_to_console=True)
+
+        prediction_summary_path = Path(validation_output_folder) / "prediction_summary.json"
+        if prediction_summary_path.exists():
+            prediction_summary = json.loads(prediction_summary_path.read_text(encoding="utf-8"))
+            prediction_summary["dice_per_channel"] = {
+                channel_name: float(summary["mean"][region_key]["Dice"])
+                for channel_name, region_key in zip(self.head_channel_names, ANATOMY_REGION_KEYS)
+            }
+            prediction_summary["mean_dice"] = float(summary["foreground_mean"]["Dice"])
+            prediction_summary_path.write_text(json.dumps(prediction_summary, ensure_ascii=False, indent=2), encoding="utf-8")
         self.set_deep_supervision_enabled(True)
