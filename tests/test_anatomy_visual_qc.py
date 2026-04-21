@@ -67,7 +67,7 @@ def test_visualize_anatomy_qc_writes_png_and_summary(tmp_path: Path) -> None:
             {
                 "case_id": case_id,
                 "fold": 0,
-                "split": "val",
+                "split": "val_0",
                 "channel_names": ["P_WG", "P_PZ", "P_TZ"],
                 "prob_path": str(prob_path),
                 "source_manifest_hash": "xyz",

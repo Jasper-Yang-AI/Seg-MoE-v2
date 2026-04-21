@@ -24,6 +24,7 @@ from segmoe_v2.nnunet_anatomy import (
     MaskedAnatomySegLoss,
     anatomy_consistency_loss,
     anatomy_consistency_weight,
+    anatomy_validation_split_name,
     anatomy_tp_fp_fn,
     anatomy_tp_fp_fn_tn,
     apply_anatomy_modality_dropout,
@@ -270,6 +271,7 @@ class nnUNetTrainerSegMoEAnatomy(nnUNetTrainer):
     def perform_actual_validation(self, save_probabilities: bool = False):
         self.set_deep_supervision_enabled(False)
         self.network.eval()
+        split_name = anatomy_validation_split_name(self.fold)
 
         predictor = nnUNetPredictor(
             tile_step_size=0.5,
@@ -369,7 +371,7 @@ class nnUNetTrainerSegMoEAnatomy(nnUNetTrainer):
                     {
                         "case_id": case_id,
                         "fold": int(self.fold),
-                        "split": "val",
+                        "split": split_name,
                         "channel_names": list(self.head_channel_names),
                         "prob_path": str(prob_path),
                         "source_manifest_hash": str(self.dataset_json.get("segmoe_source_manifest_hash", "")),
@@ -386,7 +388,7 @@ class nnUNetTrainerSegMoEAnatomy(nnUNetTrainer):
                     {
                         "task": "anatomy",
                         "fold": int(self.fold),
-                        "split": "val",
+                        "split": split_name,
                         "channel_names": list(self.head_channel_names),
                         "case_count": len(manifest_records),
                         "hierarchy_consistency_applied": True,

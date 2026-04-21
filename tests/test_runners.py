@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 from segmoe_v2.contracts import CaseManifestRow, TaskSpec
-from segmoe_v2.runners import NnFormerRunner, NnUNetResEncRunner, SwinUNETRRunner
+from segmoe_v2.runners import MedNeXtRunner, NnUNetResEncRunner, SegMambaRunner
 
 
 def _case(case_id: str) -> CaseManifestRow:
@@ -49,7 +49,7 @@ def test_vendored_runners_resolve_default_roots_and_commands(tmp_path: Path) -> 
     assert nnunet_train["command"][:3] == [sys.executable, "-m", "nnunetv2.run.run_training"]
     nnunet_predict = nnunet.predict_fold(
         0,
-        "val",
+        "val_0",
         TaskSpec.anatomy(),
         [case],
         {},
@@ -61,6 +61,7 @@ def test_vendored_runners_resolve_default_roots_and_commands(tmp_path: Path) -> 
         },
     )[0]
     assert nnunet_predict["command"][:3] == [sys.executable, "-m", "segmoe_v2.nnunet_anatomy_predict"]
+    assert nnunet_predict["split"] == "val_0"
     nnunet_env = nnunet._env({})
     assert "nnUNet_raw" in nnunet_env
     repo_root = Path(__file__).resolve().parents[1]
@@ -70,18 +71,35 @@ def test_vendored_runners_resolve_default_roots_and_commands(tmp_path: Path) -> 
     assert str(nnunet.repo_root) in nnunet_env["PYTHONPATH"]
     assert str(repo_root / "src") in nnunet_env["PYTHONPATH"]
 
-    nnformer = NnFormerRunner(workspace=tmp_path)
-    nnformer_train = nnformer.train_fold(
+    mednext = MedNeXtRunner(workspace=tmp_path)
+    mednext_train = mednext.train_fold(
         0,
         TaskSpec.lesion(),
         [case],
         {"task_id": 502, "dry_run": True},
     )
-    assert nnformer.repo_root.name == "nnFormer"
-    assert nnformer_train["command"][:3] == [sys.executable, "-m", "nnformer.run.run_training"]
-    nnformer_env = nnformer._env({})
-    assert "nnFormer_raw_data_base" in nnformer_env
-    assert str(nnformer.repo_root) in nnformer_env["PYTHONPATH"]
+    assert mednext.repo_root.name == "MedNeXt-main"
+    assert mednext_train["command"][:6] == [
+        sys.executable,
+        "-m",
+        "nnunet_mednext.run.run_training",
+        "3d_fullres",
+        "nnUNetTrainerV2_MedNeXt_S_kernel3",
+        "502",
+    ]
+    mednext_env = mednext._env({})
+    assert "nnUNet_raw_data_base" in mednext_env
+    assert str(mednext.repo_root) in mednext_env["PYTHONPATH"]
 
-    swin = SwinUNETRRunner(workspace=tmp_path)
-    assert swin.repo_root.name == "SwinUNETR"
+    segmamba = SegMambaRunner(workspace=tmp_path)
+    assert segmamba.repo_root.name == "SegMamba-main"
+    segmamba_train = segmamba.train_fold(
+        0,
+        TaskSpec.lesion(),
+        [case],
+        {"dry_run": True},
+    )
+    assert segmamba_train["command"][:2] == [sys.executable, "3_train.py"]
+    segmamba_env = segmamba._env(0, "train", {})
+    assert str(segmamba.repo_root / "mamba") in segmamba_env["PYTHONPATH"]
+    assert str(segmamba.repo_root / "causal-conv1d") in segmamba_env["PYTHONPATH"]

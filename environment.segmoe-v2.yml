@@ -1,6 +1,17 @@
-name: segmoe-v2
+name: segmoe
 channels:
   - conda-forge
+  - nodefaults
 dependencies:
   - python=3.10
-  - pip
+  - pip>=24
+  - setuptools>=69
+  - wheel
+  - packaging
+  - ninja
+  - cmake
+  - gcc_linux-64
+  - gxx_linux-64
+variables:
+  CC: x86_64-conda-linux-gnu-cc
+  CXX: x86_64-conda-linux-gnu-c++

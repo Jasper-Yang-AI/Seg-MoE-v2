@@ -6,8 +6,28 @@ import shutil
 from pathlib import Path
 from typing import Any, Iterable, Literal
 
-import nibabel as nib
 import numpy as np
+
+try:
+    import nibabel as nib
+except ModuleNotFoundError:
+    class _MissingNibabel:
+        def _raise(self, *_args: Any, **_kwargs: Any) -> None:
+            raise ModuleNotFoundError(
+                "nibabel is required for label conversion during backend data export. "
+                "Install the project runtime dependencies first."
+            )
+
+        def load(self, *_args: Any, **_kwargs: Any) -> None:
+            self._raise()
+
+        def save(self, *_args: Any, **_kwargs: Any) -> None:
+            self._raise()
+
+        def Nifti1Image(self, *_args: Any, **_kwargs: Any) -> None:
+            self._raise()
+
+    nib = _MissingNibabel()
 
 from .contracts import CaseManifestRow
 from .io_utils import save_json, save_jsonl, save_pickle, stable_hash
@@ -26,15 +46,16 @@ def resolve_vendored_backend_root(backend: str, explicit_root: str | Path | None
     if explicit_root is not None:
         return Path(explicit_root)
     package_root = Path(__file__).resolve().parent
-    mapping = {
-        "nnunet": package_root / "nnU-Net",
-        "nnformer": package_root / "nnFormer",
-        "swinunetr": package_root / "SwinUNETR",
+    candidates = {
+        "nnunet": ("nnU-Net",),
+        "mednext": ("MedNeXt-main", "MedNeXt", "mednext"),
+        "segmamba": ("SegMamba-main", "SegMamba", "segmamba"),
     }
     key = str(backend).lower()
-    if key not in mapping:
+    if key not in candidates:
         raise ValueError(f"Unsupported backend: {backend}")
-    return mapping[key]
+    roots = [package_root / name for name in candidates[key]]
+    return next((root for root in roots if root.exists()), roots[0])
 
 
 def _link_or_copy_file(source: str | Path, destination: str | Path) -> Path:
@@ -176,7 +197,7 @@ def export_nnunet_task(
     return outputs
 
 
-def export_nnformer_task(
+def export_mednext_task(
     rows: Iterable[CaseManifestRow],
     *,
     task_root: str | Path,
@@ -184,9 +205,6 @@ def export_nnformer_task(
     dataset_name: str,
     task: TaskName = "lesion",
 ) -> dict[str, Path]:
-    if task != "lesion":
-        raise ValueError("nnFormer task export currently supports only `lesion`.")
-
     materialized = list(rows)
     dataset_dir = Path(task_root) / f"Task{int(dataset_id):03d}_{_sanitize_dataset_name(dataset_name)}"
     images_tr = dataset_dir / "imagesTr"
@@ -202,28 +220,33 @@ def export_nnformer_task(
         _link_or_copy_file(row.t2w_path, target_images / f"{row.case_id}_0000.nii.gz")
         _link_or_copy_file(row.adc_path, target_images / f"{row.case_id}_0001.nii.gz")
         _link_or_copy_file(row.dwi_path, target_images / f"{row.case_id}_0002.nii.gz")
-        _export_label_for_task(row, task="lesion", destination=target_labels / f"{row.case_id}.nii.gz")
+        _export_label_for_task(row, task=task, destination=target_labels / f"{row.case_id}.nii.gz")
 
     train_ids = sorted(row.case_id for row in materialized if row.fixed_split == "trainval")
     test_ids = sorted(row.case_id for row in materialized if row.fixed_split == "test")
     manifest_hash = stable_hash([row.to_dict() for row in materialized])
     dataset_json = {
         "name": str(dataset_name),
-        "description": "SegMoE v2 canonical lesion dataset export for nnFormer",
+        "description": "SegMoE v2 canonical dataset export for MedNeXt",
         "tensorImageSize": "4D",
         "reference": "",
         "licence": "",
         "release": "0.1",
         "modality": {"0": "T2W", "1": "ADC", "2": "DWI"},
-        "labels": {"0": "background", "1": "lesion"},
         "numTraining": len(train_ids),
         "numTest": len(test_ids),
         "training": [{"image": f"./imagesTr/{case_id}.nii.gz", "label": f"./labelsTr/{case_id}.nii.gz"} for case_id in train_ids],
         "test": [f"./imagesTs/{case_id}.nii.gz" for case_id in test_ids],
-        "segmoe_task": "lesion",
+        "segmoe_task": task,
         "segmoe_source_manifest_hash": manifest_hash,
-        "segmoe_probability_channels": ["P_lesion"],
+        "segmoe_probability_channels": _task_probability_channels(task),
     }
+    if task == "anatomy":
+        dataset_json["labels"] = {"0": "background", "1": "PZ", "2": "TZ", "3": "lesion"}
+        dataset_json["segmoe_target_adapter"] = "multiclass_anatomy_labels"
+    else:
+        dataset_json["labels"] = {"0": "background", "1": "lesion"}
+        dataset_json["segmoe_target_adapter"] = "binary_lesion_from_label3_with_nca_zero_mask"
 
     outputs = {
         "dataset_dir": dataset_dir,
@@ -238,12 +261,12 @@ def export_nnformer_task(
             ],
             dataset_dir / "splits_final.pkl",
         ),
-        "dataset_index": save_jsonl(_build_dataset_records(materialized, task="lesion"), dataset_dir / "dataset_index.jsonl"),
+        "dataset_index": save_jsonl(_build_dataset_records(materialized, task=task), dataset_dir / "dataset_index.jsonl"),
     }
     return outputs
 
 
-def prepare_swinunetr_data(
+def prepare_segmamba_data(
     rows: Iterable[CaseManifestRow],
     *,
     output_dir: str | Path,
@@ -255,9 +278,12 @@ def prepare_swinunetr_data(
 
     dataset_index = _build_dataset_records(materialized, task=task)
     split_metadata: dict[str, Any] = {
+        "model": "SegMamba",
         "modalities": ["T2W", "ADC", "DWI"],
         "task": task,
         "probability_channels": _task_probability_channels(task),
+        "input_channels": 3,
+        "output_heads": _task_output_heads(task),
         "total_cases": len(materialized),
         "test_cases": sorted(row.case_id for row in materialized if row.fixed_split == "test"),
         "folds": {},
@@ -288,4 +314,20 @@ def prepare_swinunetr_data(
         }
 
     outputs["split_metadata"] = save_json(split_metadata, output_dir / "split_metadata.json")
+    outputs["segmamba_config"] = save_json(
+        {
+            "model": "SegMamba",
+            "dataset_index": str(outputs["dataset_index"]),
+            "split_metadata": str(outputs["split_metadata"]),
+            "test_list": str(outputs["test_list"]),
+            "train_list_pattern": str(output_dir / "fold_{fold}_train.jsonl"),
+            "val_list_pattern": str(output_dir / "fold_{fold}_val.jsonl"),
+            "task": task,
+            "modalities": ["T2W", "ADC", "DWI"],
+            "input_channels": 3,
+            "output_heads": _task_output_heads(task),
+            "probability_channels": _task_probability_channels(task),
+        },
+        output_dir / "segmamba_config.json",
+    )
     return outputs

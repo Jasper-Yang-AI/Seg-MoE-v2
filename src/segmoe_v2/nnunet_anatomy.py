@@ -17,6 +17,17 @@ ADC_CHANNEL_INDEX = 1
 DWI_CHANNEL_INDEX = 2
 
 
+def anatomy_validation_split_name(fold: int | str) -> str:
+    return f"val_{fold}"
+
+
+def normalise_prediction_fold_field(folds: Sequence[int | str]) -> int | list[int]:
+    fold_values = [int(value) for value in folds]
+    if len(fold_values) == 1:
+        return fold_values[0]
+    return fold_values
+
+
 def _insert_crop_into_image(
     image: np.ndarray,
     crop: np.ndarray,

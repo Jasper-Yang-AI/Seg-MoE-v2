@@ -14,11 +14,13 @@ from segmoe_v2.nnunet_anatomy import (
     anatomy_hard_masks_from_probabilities,
     anatomy_tp_fp_fn_tn,
     apply_anatomy_modality_dropout,
+    anatomy_validation_split_name,
     build_anatomy_validation_summary,
     build_anatomy_head_targets_torch,
     build_t2_only_input,
     convert_anatomy_logits_to_probabilities_with_correct_shape,
     enforce_anatomy_probability_hierarchy,
+    normalise_prediction_fold_field,
     write_anatomy_probability_bundle,
 )
 
@@ -34,6 +36,12 @@ def test_anatomy_torch_targets_follow_ignore_policy() -> None:
     assert torch.equal(targets[0, 2], torch.tensor([[0.0, 0.0], [1.0, 0.0]]))
     assert valid[0, 1, 1, 1].item() == 0
     assert valid[0, 2, 1, 1].item() == 0
+
+
+def test_anatomy_prediction_manifest_protocol_helpers() -> None:
+    assert anatomy_validation_split_name(0) == "val_0"
+    assert normalise_prediction_fold_field(["0"]) == 0
+    assert normalise_prediction_fold_field(["0", "1"]) == [0, 1]
 
 
 def test_masked_anatomy_loss_ignores_lesion_for_pz_tz() -> None:

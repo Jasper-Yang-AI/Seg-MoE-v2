@@ -10,6 +10,7 @@ import torch
 from .nnunet_anatomy import (
     ANATOMY_PROBABILITY_CHANNELS,
     convert_anatomy_logits_to_probabilities_with_correct_shape,
+    normalise_prediction_fold_field,
     write_anatomy_prediction_manifest,
     write_anatomy_probability_bundle,
 )
@@ -51,6 +52,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         allow_tqdm=False,
     )
     model_folder = get_output_folder(args.dataset_id, args.trainer, args.plans, args.configuration)
+    fold_field = normalise_prediction_fold_field(args.fold)
     predictor.initialize_from_trained_model_folder(
         model_folder,
         use_folds=tuple(int(v) for v in args.fold),
@@ -94,7 +96,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         manifest_records.append(
             {
                 "case_id": ofile.name,
-                "fold": [int(v) for v in args.fold],
+                "fold": fold_field,
                 "split": str(args.split_name),
                 "channel_names": list(ANATOMY_PROBABILITY_CHANNELS),
                 "prob_path": str(prob_path),

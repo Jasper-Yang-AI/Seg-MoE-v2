@@ -62,10 +62,11 @@ def test_cli_manifest_and_backend_exports(tmp_path: Path) -> None:
     manifest_path = tmp_path / "manifest" / "cases.jsonl"
     summary_path = tmp_path / "manifest" / "manifest_summary.csv"
     nnunet_splits = tmp_path / "manifest" / "nnunet_splits_final.json"
-    nnformer_splits = tmp_path / "manifest" / "nnformer_splits_final.pkl"
+    mednext_splits = tmp_path / "manifest" / "mednext_splits_final.pkl"
+    segmamba_splits = tmp_path / "manifest" / "segmamba_splits_final.json"
     nnunet_root = tmp_path / "exports" / "nnunet_anatomy"
-    nnformer_root = tmp_path / "exports" / "nnformer_lesion"
-    swin_output = tmp_path / "exports" / "swin_anatomy"
+    mednext_root = tmp_path / "exports" / "mednext_lesion"
+    segmamba_output = tmp_path / "exports" / "segmamba_anatomy"
 
     with patch("segmoe_v2.manifest.nib.load", side_effect=_fake_load):
         main(
@@ -80,15 +81,18 @@ def test_cli_manifest_and_backend_exports(tmp_path: Path) -> None:
                 str(summary_path),
                 "--nnunet-splits-out",
                 str(nnunet_splits),
-                "--nnformer-splits-out",
-                str(nnformer_splits),
+                "--mednext-splits-out",
+                str(mednext_splits),
+                "--segmamba-splits-out",
+                str(segmamba_splits),
             ]
         )
 
     assert manifest_path.exists()
     assert summary_path.exists()
     assert nnunet_splits.exists()
-    assert nnformer_splits.exists()
+    assert mednext_splits.exists()
+    assert segmamba_splits.exists()
 
     main(
         [
@@ -97,8 +101,10 @@ def test_cli_manifest_and_backend_exports(tmp_path: Path) -> None:
             str(manifest_path),
             "--nnunet-splits",
             str(nnunet_splits),
-            "--nnformer-splits",
-            str(nnformer_splits),
+            "--mednext-splits",
+            str(mednext_splits),
+            "--segmamba-splits",
+            str(segmamba_splits),
         ]
     )
 
@@ -144,11 +150,11 @@ def test_cli_manifest_and_backend_exports(tmp_path: Path) -> None:
     ):
         main(
             [
-                "export-nnformer-task",
+                "export-mednext-task",
                 "--manifest",
                 str(manifest_path),
                 "--task-root",
-                str(nnformer_root),
+                str(mednext_root),
                 "--dataset-id",
                 "502",
                 "--dataset-name",
@@ -157,26 +163,28 @@ def test_cli_manifest_and_backend_exports(tmp_path: Path) -> None:
                 "lesion",
             ]
         )
-    nnformer_dataset_dir = nnformer_root / "Task502_ProstateCanonical"
-    assert (nnformer_dataset_dir / "dataset.json").exists()
-    assert (nnformer_dataset_dir / "splits_final.pkl").exists()
+    mednext_dataset_dir = mednext_root / "Task502_ProstateCanonical"
+    assert (mednext_dataset_dir / "dataset.json").exists()
+    assert (mednext_dataset_dir / "splits_final.pkl").exists()
     assert any(path.endswith("pca_000.nii.gz") for path in saved_labels)
     exported_label = next(array for path, array in saved_labels.items() if path.endswith("pca_000.nii.gz"))
     assert set(np.unique(exported_label).tolist()) <= {0, 1}
 
     main(
         [
-            "prepare-swinunetr-data",
+            "prepare-segmamba-data",
             "--manifest",
             str(manifest_path),
             "--output-dir",
-            str(swin_output),
+            str(segmamba_output),
             "--task",
             "anatomy",
         ]
     )
-    assert (swin_output / "dataset_index.jsonl").exists()
-    assert (swin_output / "split_metadata.json").exists()
-    assert (swin_output / "fold_0_train.jsonl").exists()
-    split_metadata = __import__("json").loads((swin_output / "split_metadata.json").read_text(encoding="utf-8"))
+    assert (segmamba_output / "dataset_index.jsonl").exists()
+    assert (segmamba_output / "split_metadata.json").exists()
+    assert (segmamba_output / "segmamba_config.json").exists()
+    assert (segmamba_output / "fold_0_train.jsonl").exists()
+    split_metadata = __import__("json").loads((segmamba_output / "split_metadata.json").read_text(encoding="utf-8"))
     assert split_metadata["task"] == "anatomy"
+    assert split_metadata["model"] == "SegMamba"

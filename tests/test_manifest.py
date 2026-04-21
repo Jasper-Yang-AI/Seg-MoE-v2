@@ -12,8 +12,9 @@ from segmoe_v2.manifest import (
     audit_manifest_artifacts,
     build_case_manifest,
     build_manifest_summary_rows,
-    export_nnformer_splits,
+    export_mednext_splits,
     export_nnunet_splits,
+    export_segmamba_splits,
     scan_case_roots,
     write_manifest_artifacts,
 )
@@ -70,13 +71,15 @@ def test_scan_build_summary_and_artifacts(tmp_path: Path) -> None:
     manifest_path = tmp_path / "artifacts" / "manifest.jsonl"
     summary_path = tmp_path / "artifacts" / "manifest_summary.csv"
     nnunet_path = tmp_path / "artifacts" / "splits_final.json"
-    nnformer_path = tmp_path / "artifacts" / "splits_final.pkl"
+    mednext_path = tmp_path / "artifacts" / "splits_final.pkl"
+    segmamba_path = tmp_path / "artifacts" / "segmamba_splits_final.json"
     write_manifest_artifacts(
         manifest,
         manifest_path=manifest_path,
         summary_path=summary_path,
         nnunet_splits_path=nnunet_path,
-        nnformer_splits_path=nnformer_path,
+        mednext_splits_path=mednext_path,
+        segmamba_splits_path=segmamba_path,
     )
 
     with summary_path.open("r", encoding="utf-8", newline="") as handle:
@@ -86,7 +89,8 @@ def test_scan_build_summary_and_artifacts(tmp_path: Path) -> None:
     report = audit_manifest_artifacts(
         manifest_path=manifest_path,
         nnunet_splits_path=nnunet_path,
-        nnformer_splits_path=nnformer_path,
+        mednext_splits_path=mednext_path,
+        segmamba_splits_path=segmamba_path,
     )
     assert not report.has_errors
 
@@ -111,9 +115,15 @@ def test_audit_detects_fold_mismatch() -> None:
         )
     ]
     nnunet_splits = export_nnunet_splits(rows)
-    nnformer_splits = export_nnformer_splits(rows)
-    nnformer_splits[0]["val"] = list(nnformer_splits[1]["val"])
-    report = audit_manifest(rows, nnunet_splits=nnunet_splits, nnformer_splits=nnformer_splits)
+    mednext_splits = export_mednext_splits(rows)
+    segmamba_splits = export_segmamba_splits(rows)
+    mednext_splits[0]["val"] = list(mednext_splits[1]["val"])
+    report = audit_manifest(
+        rows,
+        nnunet_splits=nnunet_splits,
+        mednext_splits=mednext_splits,
+        segmamba_splits=segmamba_splits,
+    )
     assert report.has_errors
     assert any("mismatch on fold 0 val members" in message for message in report.errors)
 

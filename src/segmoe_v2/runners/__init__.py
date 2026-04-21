@@ -1,6 +1,6 @@
 from .base import BaseRunner
-from .nnformer import NnFormerRunner
+from .mednext import MedNeXtRunner
 from .nnunet import NnUNetResEncRunner
-from .swinunetr import SwinUNETRRunner
+from .segmamba import SegMambaRunner
 
-__all__ = ["BaseRunner", "NnFormerRunner", "NnUNetResEncRunner", "SwinUNETRRunner"]
+__all__ = ["BaseRunner", "MedNeXtRunner", "NnUNetResEncRunner", "SegMambaRunner"]

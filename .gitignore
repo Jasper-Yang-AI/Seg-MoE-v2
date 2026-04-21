@@ -4,6 +4,7 @@
 .DS_Store
 Thumbs.db
 desktop.ini
+*:Zone.Identifier
 
 .vscode/
 .idea/
@@ -108,6 +109,13 @@ src/segmoe_v2/SwinUNETR/runs/
 nnUNet_raw/
 nnUNet_preprocessed/
 nnUNet_results/
+
+MedNeXt_raw_data_base/
+MedNeXt_preprocessed/
+MedNeXt_results/
+SegMamba_data/
+SegMamba_runs/
+SegMamba_predictions/
 
 nnFormer_data/
 nnFormer_preprocessed/

@@ -7,8 +7,21 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-import nibabel as nib
 import numpy as np
+
+try:
+    import nibabel as nib
+except ModuleNotFoundError:
+    class _MissingNibabel:
+        def _raise(self, *_args: Any, **_kwargs: Any) -> None:
+            raise ModuleNotFoundError(
+                "nibabel is required for scanning image roots. Install the project runtime dependencies first."
+            )
+
+        def load(self, *_args: Any, **_kwargs: Any) -> None:
+            self._raise()
+
+    nib = _MissingNibabel()
 
 from .contracts import CaseManifestRow
 from .io_utils import load_json, load_jsonl, load_pickle, save_csv_rows, save_json, save_jsonl, save_pickle
@@ -188,7 +201,7 @@ def build_case_manifest(
     return sorted(assigned, key=lambda row: row.case_id)
 
 
-def export_nnunet_splits(rows: Iterable[CaseManifestRow]) -> list[dict[str, list[str]]]:
+def _export_fold_splits(rows: Iterable[CaseManifestRow]) -> list[dict[str, list[str]]]:
     rows = list(rows)
     folds = sorted({row.val_fold for row in rows if row.fixed_split == "trainval" and row.val_fold is not None})
     split_dicts: list[dict[str, list[str]]] = []
@@ -199,8 +212,16 @@ def export_nnunet_splits(rows: Iterable[CaseManifestRow]) -> list[dict[str, list
     return split_dicts
 
 
-def export_nnformer_splits(rows: Iterable[CaseManifestRow]) -> list[dict[str, list[str]]]:
-    return export_nnunet_splits(rows)
+def export_nnunet_splits(rows: Iterable[CaseManifestRow]) -> list[dict[str, list[str]]]:
+    return _export_fold_splits(rows)
+
+
+def export_mednext_splits(rows: Iterable[CaseManifestRow]) -> list[dict[str, list[str]]]:
+    return _export_fold_splits(rows)
+
+
+def export_segmamba_splits(rows: Iterable[CaseManifestRow]) -> list[dict[str, list[str]]]:
+    return _export_fold_splits(rows)
 
 
 def _count_by(rows: Sequence[CaseManifestRow], attr: str) -> dict[str, int]:
@@ -281,8 +302,13 @@ def load_nnunet_splits(path: str | Path) -> list[dict[str, list[str]]]:
     return [{"train": list(item.get("train", [])), "val": list(item.get("val", []))} for item in payload]
 
 
-def load_nnformer_splits(path: str | Path) -> list[dict[str, list[str]]]:
+def load_mednext_splits(path: str | Path) -> list[dict[str, list[str]]]:
     payload = load_pickle(path)
+    return [{"train": list(item.get("train", [])), "val": list(item.get("val", []))} for item in payload]
+
+
+def load_segmamba_splits(path: str | Path) -> list[dict[str, list[str]]]:
+    payload = load_json(path)
     return [{"train": list(item.get("train", [])), "val": list(item.get("val", []))} for item in payload]
 
 
@@ -356,7 +382,8 @@ def audit_manifest(
     rows: Iterable[CaseManifestRow],
     *,
     nnunet_splits: Sequence[Mapping[str, Sequence[str]]] | None = None,
-    nnformer_splits: Sequence[Mapping[str, Sequence[str]]] | None = None,
+    mednext_splits: Sequence[Mapping[str, Sequence[str]]] | None = None,
+    segmamba_splits: Sequence[Mapping[str, Sequence[str]]] | None = None,
 ) -> ManifestAuditReport:
     materialized = list(rows)
     errors: list[str] = []
@@ -401,7 +428,8 @@ def audit_manifest(
     _audit_cohort_balance(materialized, n_folds=len(folds), errors=errors, warnings=warnings)
 
     expected_nnunet = export_nnunet_splits(materialized)
-    expected_nnformer = export_nnformer_splits(materialized)
+    expected_mednext = export_mednext_splits(materialized)
+    expected_segmamba = export_segmamba_splits(materialized)
     if nnunet_splits is not None:
         _compare_split_payloads(
             left_name="manifest-derived nnUNet",
@@ -410,23 +438,46 @@ def audit_manifest(
             right_splits=nnunet_splits,
             errors=errors,
         )
-    if nnformer_splits is not None:
+    if mednext_splits is not None:
         _compare_split_payloads(
-            left_name="manifest-derived nnFormer",
-            left_splits=expected_nnformer,
-            right_name="provided nnFormer",
-            right_splits=nnformer_splits,
+            left_name="manifest-derived MedNeXt",
+            left_splits=expected_mednext,
+            right_name="provided MedNeXt",
+            right_splits=mednext_splits,
             errors=errors,
         )
-    if nnunet_splits is not None and nnformer_splits is not None:
+    if segmamba_splits is not None:
+        _compare_split_payloads(
+            left_name="manifest-derived SegMamba",
+            left_splits=expected_segmamba,
+            right_name="provided SegMamba",
+            right_splits=segmamba_splits,
+            errors=errors,
+        )
+    if nnunet_splits is not None and mednext_splits is not None:
         _compare_split_payloads(
             left_name="nnUNet",
             left_splits=nnunet_splits,
-            right_name="nnFormer",
-            right_splits=nnformer_splits,
+            right_name="MedNeXt",
+            right_splits=mednext_splits,
             errors=errors,
         )
-
+    if nnunet_splits is not None and segmamba_splits is not None:
+        _compare_split_payloads(
+            left_name="nnUNet",
+            left_splits=nnunet_splits,
+            right_name="SegMamba",
+            right_splits=segmamba_splits,
+            errors=errors,
+        )
+    if nnunet_splits is None and mednext_splits is not None and segmamba_splits is not None:
+        _compare_split_payloads(
+            left_name="MedNeXt",
+            left_splits=mednext_splits,
+            right_name="SegMamba",
+            right_splits=segmamba_splits,
+            errors=errors,
+        )
     stats = {
         "total_cases": len(materialized),
         "total_patients": len(set(patient_ids)),
@@ -468,12 +519,19 @@ def audit_manifest_artifacts(
     *,
     manifest_path: str | Path,
     nnunet_splits_path: str | Path | None = None,
-    nnformer_splits_path: str | Path | None = None,
+    mednext_splits_path: str | Path | None = None,
+    segmamba_splits_path: str | Path | None = None,
 ) -> ManifestAuditReport:
     rows = load_case_manifest(manifest_path)
     nnunet_splits = load_nnunet_splits(nnunet_splits_path) if nnunet_splits_path is not None else None
-    nnformer_splits = load_nnformer_splits(nnformer_splits_path) if nnformer_splits_path is not None else None
-    return audit_manifest(rows, nnunet_splits=nnunet_splits, nnformer_splits=nnformer_splits)
+    mednext_splits = load_mednext_splits(mednext_splits_path) if mednext_splits_path is not None else None
+    segmamba_splits = load_segmamba_splits(segmamba_splits_path) if segmamba_splits_path is not None else None
+    return audit_manifest(
+        rows,
+        nnunet_splits=nnunet_splits,
+        mednext_splits=mednext_splits,
+        segmamba_splits=segmamba_splits,
+    )
 
 
 def write_manifest_artifacts(
@@ -482,7 +540,8 @@ def write_manifest_artifacts(
     manifest_path: str | Path,
     summary_path: str | Path | None = None,
     nnunet_splits_path: str | Path | None = None,
-    nnformer_splits_path: str | Path | None = None,
+    mednext_splits_path: str | Path | None = None,
+    segmamba_splits_path: str | Path | None = None,
 ) -> dict[str, Path]:
     rows = list(rows)
     if summary_path is None:
@@ -494,6 +553,8 @@ def write_manifest_artifacts(
     }
     if nnunet_splits_path is not None:
         outputs["nnunet_splits"] = save_json(export_nnunet_splits(rows), nnunet_splits_path)
-    if nnformer_splits_path is not None:
-        outputs["nnformer_splits"] = save_pickle(export_nnformer_splits(rows), nnformer_splits_path)
+    if mednext_splits_path is not None:
+        outputs["mednext_splits"] = save_pickle(export_mednext_splits(rows), mednext_splits_path)
+    if segmamba_splits_path is not None:
+        outputs["segmamba_splits"] = save_json(export_segmamba_splits(rows), segmamba_splits_path)
     return outputs

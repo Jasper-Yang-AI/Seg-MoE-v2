@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Sequence
 
 from ..anatomy_visual_qc import generate_anatomy_visual_qc
-from ..backend_data import export_nnformer_task, export_nnunet_task, prepare_swinunetr_data
+from ..backend_data import export_mednext_task, export_nnunet_task, prepare_segmamba_data
 from ..geometry_audit import (
     GeometryAuditThresholds,
     audit_geometry,
@@ -45,7 +45,8 @@ def build_parser() -> argparse.ArgumentParser:
     manifest_parser.add_argument("--manifest-out", required=True)
     manifest_parser.add_argument("--summary-out", required=False)
     manifest_parser.add_argument("--nnunet-splits-out", required=True)
-    manifest_parser.add_argument("--nnformer-splits-out", required=True)
+    manifest_parser.add_argument("--mednext-splits-out", required=True)
+    manifest_parser.add_argument("--segmamba-splits-out", required=True)
     manifest_parser.add_argument("--patient-map", required=False)
     manifest_parser.add_argument("--test-ratio", type=float, default=0.15)
     manifest_parser.add_argument("--folds", type=int, default=5)
@@ -54,7 +55,8 @@ def build_parser() -> argparse.ArgumentParser:
     audit_parser = sub.add_parser("audit-manifest", help="Audit manifest and backend splits")
     audit_parser.add_argument("--manifest", required=True)
     audit_parser.add_argument("--nnunet-splits", required=True)
-    audit_parser.add_argument("--nnformer-splits", required=True)
+    audit_parser.add_argument("--mednext-splits", required=True)
+    audit_parser.add_argument("--segmamba-splits", required=True)
 
     nnunet_export = sub.add_parser("export-nnunet-task", help="Export canonical raw dataset layout for nnUNet")
     nnunet_export.add_argument("--manifest", required=True)
@@ -63,17 +65,17 @@ def build_parser() -> argparse.ArgumentParser:
     nnunet_export.add_argument("--dataset-name", required=True)
     nnunet_export.add_argument("--task", choices=("anatomy", "lesion"), default="lesion")
 
-    nnformer_export = sub.add_parser("export-nnformer-task", help="Export canonical raw dataset layout for nnFormer")
-    nnformer_export.add_argument("--manifest", required=True)
-    nnformer_export.add_argument("--task-root", required=True)
-    nnformer_export.add_argument("--dataset-id", type=int, required=True)
-    nnformer_export.add_argument("--dataset-name", required=True)
-    nnformer_export.add_argument("--task", choices=("anatomy", "lesion"), default="lesion")
+    mednext_export = sub.add_parser("export-mednext-task", help="Export canonical raw dataset layout for MedNeXt")
+    mednext_export.add_argument("--manifest", required=True)
+    mednext_export.add_argument("--task-root", required=True)
+    mednext_export.add_argument("--dataset-id", type=int, required=True)
+    mednext_export.add_argument("--dataset-name", required=True)
+    mednext_export.add_argument("--task", choices=("anatomy", "lesion"), default="lesion")
 
-    swin_prep = sub.add_parser("prepare-swinunetr-data", help="Write dataset index and split lists for SwinUNETR")
-    swin_prep.add_argument("--manifest", required=True)
-    swin_prep.add_argument("--output-dir", required=True)
-    swin_prep.add_argument("--task", choices=("anatomy", "lesion"), default="lesion")
+    segmamba_prep = sub.add_parser("prepare-segmamba-data", help="Write dataset index and split lists for SegMamba")
+    segmamba_prep.add_argument("--manifest", required=True)
+    segmamba_prep.add_argument("--output-dir", required=True)
+    segmamba_prep.add_argument("--task", choices=("anatomy", "lesion"), default="lesion")
 
     geometry_audit = sub.add_parser("audit-geometry", help="Audit multimodal geometry consistency for all manifest cases")
     geometry_audit.add_argument("--manifest", required=True)
@@ -138,12 +140,14 @@ def main(argv: Sequence[str] | None = None) -> None:
             manifest_path=manifest_out,
             summary_path=summary_out,
             nnunet_splits_path=Path(args.nnunet_splits_out),
-            nnformer_splits_path=Path(args.nnformer_splits_out),
+            mednext_splits_path=Path(args.mednext_splits_out),
+            segmamba_splits_path=Path(args.segmamba_splits_out),
         )
         report = audit_manifest_artifacts(
             manifest_path=manifest_out,
             nnunet_splits_path=args.nnunet_splits_out,
-            nnformer_splits_path=args.nnformer_splits_out,
+            mednext_splits_path=args.mednext_splits_out,
+            segmamba_splits_path=args.segmamba_splits_out,
         )
         print(format_audit_report(report))
         if report.has_errors:
@@ -154,7 +158,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         report = audit_manifest_artifacts(
             manifest_path=args.manifest,
             nnunet_splits_path=args.nnunet_splits,
-            nnformer_splits_path=args.nnformer_splits,
+            mednext_splits_path=args.mednext_splits,
+            segmamba_splits_path=args.segmamba_splits,
         )
         print(format_audit_report(report))
         if report.has_errors:
@@ -174,20 +179,20 @@ def main(argv: Sequence[str] | None = None) -> None:
         print(f"nnUNet task exported to {outputs['dataset_dir']}")
         return
 
-    if args.command == "export-nnformer-task":
-        outputs = export_nnformer_task(
+    if args.command == "export-mednext-task":
+        outputs = export_mednext_task(
             rows,
             task_root=args.task_root,
             dataset_id=int(args.dataset_id),
             dataset_name=args.dataset_name,
             task=args.task,
         )
-        print(f"nnFormer task exported to {outputs['dataset_dir']}")
+        print(f"MedNeXt task exported to {outputs['dataset_dir']}")
         return
 
-    if args.command == "prepare-swinunetr-data":
-        outputs = prepare_swinunetr_data(rows, output_dir=args.output_dir, task=args.task)
-        print(f"SwinUNETR data prepared at {outputs['split_metadata'].parent}")
+    if args.command == "prepare-segmamba-data":
+        outputs = prepare_segmamba_data(rows, output_dir=args.output_dir, task=args.task)
+        print(f"SegMamba data prepared at {outputs['split_metadata'].parent}")
         return
 
     if args.command == "audit-geometry":

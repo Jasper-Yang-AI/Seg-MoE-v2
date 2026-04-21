@@ -1,2 +1,0 @@
--r v2-runtime.txt
-pytest>=8.0
