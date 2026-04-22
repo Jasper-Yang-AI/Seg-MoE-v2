@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 
 import torch
+from segmoe_v2.backend_data import resolve_vendored_backend_root
 
-_NNUNET_SRC = Path(__file__).resolve().parents[1] / "src" / "segmoe_v2" / "nnU-Net"
+_NNUNET_SRC = resolve_vendored_backend_root("nnunet")
 if str(_NNUNET_SRC) not in sys.path:
     sys.path.insert(0, str(_NNUNET_SRC))
 

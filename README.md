@@ -3,14 +3,14 @@
 SegMoE v2 is a 3D prostate mpMRI segmentation workspace. The current Linux
 layout is aligned around three vendored backends:
 
-- `src/segmoe_v2/nnU-Net`: active anatomy closed loop.
-- `src/segmoe_v2/MedNeXt-main`: nnU-Net v1 style MedNeXt backend.
-- `src/segmoe_v2/SegMamba-main`: SegMamba source tree and model import path.
+- `external/nnU-Net`: active anatomy closed loop.
+- `external/MedNeXt-main`: nnU-Net v1 style MedNeXt backend.
+- `external/SegMamba`: SegMamba source tree and model import path.
 
 The first production training loop is still nnU-Net anatomy. MedNeXt data export
-and runner wiring are aligned. SegMamba is source/data aligned, but the upstream
-`3_train.py` and `4_predict.py` are still BraTS-specific scripts, so a prostate
-training adapter is the next piece before treating SegMamba as a closed loop.
+and runner wiring are aligned. SegMamba uses the SegMoE adapter
+`python -m segmoe_v2.segmamba_adapter` for Layer1 lesion+mimic training instead
+of the upstream random split scripts.
 
 ## Environment
 
@@ -32,16 +32,16 @@ python -m pip install torch torchvision --index-url https://download.pytorch.org
 Then install the project runtime and editable package:
 
 ```bash
-python -m pip install -r requirements/v2-runtime.txt
+python -m pip install -r requirements.txt
 python -m pip install -e . --no-deps
 ```
 
 Optional editable installs for backend entry points:
 
 ```bash
-python -m pip install -e src/segmoe_v2/MedNeXt-main --no-deps
-python -m pip install -e src/segmoe_v2/SegMamba-main/causal-conv1d
-python -m pip install -e src/segmoe_v2/SegMamba-main/mamba
+python -m pip install -e external/MedNeXt-main --no-deps
+python -m pip install -e external/SegMamba/causal-conv1d
+python -m pip install -e external/SegMamba/mamba
 ```
 
 Notes:
@@ -74,7 +74,7 @@ PY
 For direct backend commands, set the source paths and workspaces:
 
 ```bash
-export PYTHONPATH="$PWD/src:$PWD/src/segmoe_v2/nnU-Net:$PWD/src/segmoe_v2/MedNeXt-main:$PWD/src/segmoe_v2/SegMamba-main:$PWD/src/segmoe_v2/SegMamba-main/mamba:$PWD/src/segmoe_v2/SegMamba-main/causal-conv1d"
+export PYTHONPATH="$PWD/src:$PWD/external/nnU-Net:$PWD/external/MedNeXt-main:$PWD/external/SegMamba:$PWD/external/SegMamba/mamba:$PWD/external/SegMamba/causal-conv1d"
 
 export nnUNet_raw="$PWD/nnUNet_raw"
 export nnUNet_preprocessed="$PWD/nnUNet_preprocessed"
@@ -249,23 +249,45 @@ CUDA_VISIBLE_DEVICES=0 python -m nnunet_mednext.run.run_training \
   --npz
 ```
 
-The `MedNeXtRunner` now resolves `src/segmoe_v2/MedNeXt-main` automatically and
+The `MedNeXtRunner` now resolves `external/MedNeXt-main` automatically and
 uses `python -m nnunet_mednext...` by default, so editable install is useful but
 not required for runner subprocesses.
 
 ## SegMamba Backend
 
-Prepare SegMamba split/index files from the canonical manifest:
+Layer1 SegMamba is wired through the SegMoE adapter, not the upstream BraTS
+`3_train.py`/`4_predict.py` defaults. Build the Stage A+ gland ROI manifest
+from anatomy probabilities first:
+
+```bash
+python -m segmoe_v2.cli.main build-gland-crop-manifest \
+  --manifest data/manifest/cases.geometry_fixed.jsonl \
+  --anatomy-predictions data/exports/anatomy_oof/prediction_manifest.jsonl \
+  --output data/exports/layer1/gland_crop_manifest.jsonl \
+  --min-crop-size-zyx 24 192 192
+```
+
+Layer1 gland crops are candidate-first ROIs. The crop is based on the largest
+`P_WG >= 0.35` component with a 12 mm margin, then expanded to at least
+`(24, 192, 192)` in Z/Y/X when native image size allows. Crop-space predictions
+store `bbox_zyx` and `native_shape_zyx`; use the shared ROI helper to reinflate
+them for full-image QC, component mining, FP-bank visualization, and Layer2
+statistics.
+
+Prepare SegMamba Layer1 ROI data and split/index files:
 
 ```bash
 python -m segmoe_v2.cli.main prepare-segmamba-data \
   --manifest data/manifest/cases.geometry_fixed.jsonl \
   --output-dir data/exports/segmamba \
-  --task lesion
+  --task lesion \
+  --anatomy-predictions data/exports/anatomy_oof/prediction_manifest.jsonl \
+  --crop-manifest data/exports/layer1/gland_crop_manifest.jsonl
 ```
 
 This writes:
 
+- `arrays/<case_id>.npz` with `data` shape `(6,Z,Y,X)` and tri-state `seg`
 - `dataset_index.jsonl`
 - `fold_<k>_train.jsonl`
 - `fold_<k>_val.jsonl`
@@ -273,23 +295,65 @@ This writes:
 - `split_metadata.json`
 - `segmamba_config.json`
 
-The `SegMambaRunner` resolves `src/segmoe_v2/SegMamba-main` and injects:
+Layer1 lesion labels are high-recall candidate labels:
 
-- `src/segmoe_v2/SegMamba-main`
-- `src/segmoe_v2/SegMamba-main/mamba`
-- `src/segmoe_v2/SegMamba-main/causal-conv1d`
+- `0=background`
+- `1=PCA lesion`
+- `2=NCA mimic`
 
-into `PYTHONPATH`. The upstream training scripts still hard-code BraTS paths,
-four input channels, and BraTS labels. Use this backend only after adding a
-SegMoE prostate adapter or replacing those scripts with parameterized training
-entry points.
+The Layer1 target treats `{1,2}` as positive. Layer2 later treats NCA mimic and
+Layer1 FP components as hard negatives for refinement.
+
+Layer1 exports are source-aware:
+
+- `label==1` PCA lesion remains positive with BCE weight `1.25`
+- `label==2` NCA mimic remains positive with BCE weight `0.75`
+- background uses weight `1.0`
+
+SegMamba `.npz` arrays contain `seg_source`, `seg_target`, and `voxel_weight`.
+nnU-Net and MedNeXt lesion exports write binary candidate labels plus sidecar
+`sourceLabels*` and `weights*` folders.
+
+To prepare all three Layer1 experts from the same manifest/prior/crop contract:
+
+```bash
+python -m segmoe_v2.cli.main prepare-layer1-moe \
+  --manifest data/manifest/cases.geometry_fixed.jsonl \
+  --anatomy-predictions data/exports/anatomy_oof/prediction_manifest.jsonl \
+  --crop-manifest data/exports/layer1/gland_crop_manifest.jsonl \
+  --config-out data/exports/layer1/layer1_moe_config.json \
+  --nnunet-task-root nnUNet_raw \
+  --nnunet-dataset-id 502 \
+  --nnunet-dataset-name ProstateLayer1 \
+  --mednext-task-root MedNeXt_raw_data_base/nnUNet_raw_data \
+  --mednext-dataset-id 502 \
+  --mednext-dataset-name ProstateLayer1 \
+  --segmamba-output-dir data/exports/segmamba
+```
+
+The generated `layer1_moe_config.json` defines the three Layer1 experts:
+
+- nnU-Net: local boundary expert
+- MedNeXt: large-kernel/multiscale context expert
+- SegMamba: long-range ROI context expert
+
+The `SegMambaRunner` resolves `external/SegMamba` and injects:
+
+- `external/SegMamba`
+- `external/SegMamba/mamba`
+- `external/SegMamba/causal-conv1d`
+
+into `PYTHONPATH`. Runner calls with `config=data/exports/segmamba/segmamba_config.json`
+use `python -m segmoe_v2.segmamba_adapter` by default and export crop-space
+`.npz` logits as the primary Layer1 prediction artifact.
 
 ## Tests
 
 Run the repo tests that cover manifest/export and runner alignment:
 
 ```bash
-python -m pip install -r requirements/v2-dev.txt
+python -m pip install -r requirements.txt
+python -m pip install pytest
 pytest tests/test_cli.py tests/test_manifest.py tests/test_runners.py -q
 ```
 

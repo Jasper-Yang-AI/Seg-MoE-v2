@@ -167,8 +167,12 @@ def test_cli_manifest_and_backend_exports(tmp_path: Path) -> None:
     assert (mednext_dataset_dir / "dataset.json").exists()
     assert (mednext_dataset_dir / "splits_final.pkl").exists()
     assert any(path.endswith("pca_000.nii.gz") for path in saved_labels)
-    exported_label = next(array for path, array in saved_labels.items() if path.endswith("pca_000.nii.gz"))
+    exported_label = next(array for path, array in saved_labels.items() if path.endswith("labelsTr/pca_000.nii.gz"))
+    exported_source = next(array for path, array in saved_labels.items() if path.endswith("sourceLabelsTr/pca_000.nii.gz"))
+    exported_weight = next(array for path, array in saved_labels.items() if path.endswith("weightsTr/pca_000.nii.gz"))
     assert set(np.unique(exported_label).tolist()) <= {0, 1}
+    assert set(np.unique(exported_source).tolist()) <= {0, 1}
+    assert float(exported_weight.max()) == 1.25
 
     main(
         [

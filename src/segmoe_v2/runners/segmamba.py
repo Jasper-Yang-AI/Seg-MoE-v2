@@ -51,7 +51,7 @@ class SegMambaRunner(BaseRunner):
     def build_model(
         self,
         *,
-        in_channels: int = 3,
+        in_channels: int = 6,
         out_channels: int = 1,
         pretrained_path: str | Path | None = None,
         **kwargs: Any,
@@ -82,9 +82,26 @@ class SegMambaRunner(BaseRunner):
         cases: Sequence[CaseManifestRow],
         experiment_cfg: Mapping[str, Any],
     ) -> Mapping[str, Any]:
-        script = experiment_cfg.get("train_script", "3_train.py")
-        command = [sys.executable, str(script)]
-        command.extend(str(arg) for arg in experiment_cfg.get("train_args", ()))
+        config = experiment_cfg.get("config") or experiment_cfg.get("config_path")
+        if config:
+            command = [
+                sys.executable,
+                "-m",
+                "segmoe_v2.segmamba_adapter",
+                "train",
+                "--config",
+                str(config),
+                "--fold",
+                str(fold),
+            ]
+            if experiment_cfg.get("adapter_dry_run", False):
+                command.append("--dry-run")
+            if experiment_cfg.get("max_epochs") is not None:
+                command.extend(["--max-epochs", str(experiment_cfg["max_epochs"])])
+        else:
+            script = experiment_cfg.get("train_script", "3_train.py")
+            command = [sys.executable, str(script)]
+            command.extend(str(arg) for arg in experiment_cfg.get("train_args", ()))
         if experiment_cfg.get("dry_run", False):
             return {
                 "command": command,
@@ -106,9 +123,29 @@ class SegMambaRunner(BaseRunner):
         checkpoint_ref: Mapping[str, Any],
         experiment_cfg: Mapping[str, Any],
     ) -> Sequence[Mapping[str, Any]]:
-        script = experiment_cfg.get("predict_script", "4_predict.py")
-        command = [sys.executable, str(script)]
-        command.extend(str(arg) for arg in experiment_cfg.get("predict_args", ()))
+        config = experiment_cfg.get("config") or experiment_cfg.get("config_path")
+        if config:
+            command = [
+                sys.executable,
+                "-m",
+                "segmoe_v2.segmamba_adapter",
+                "predict",
+                "--config",
+                str(config),
+                "--fold",
+                str(fold),
+                "--split",
+                str(split_name),
+            ]
+            checkpoint = checkpoint_ref.get("checkpoint") or checkpoint_ref.get("checkpoint_path")
+            if checkpoint:
+                command.extend(["--checkpoint", str(checkpoint)])
+            if experiment_cfg.get("adapter_dry_run", False):
+                command.append("--dry-run")
+        else:
+            script = experiment_cfg.get("predict_script", "4_predict.py")
+            command = [sys.executable, str(script)]
+            command.extend(str(arg) for arg in experiment_cfg.get("predict_args", ()))
         if experiment_cfg.get("dry_run", False):
             return [
                 {

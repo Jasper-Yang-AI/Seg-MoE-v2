@@ -1,34 +1,19 @@
 from __future__ import annotations
 
-import random
-
-from segmoe_v2.sampling import Layer1BalancedBatchSampler, choose_layer1_crop_mode
+from segmoe_v2.sampling import Layer1HighRecallBatchSampler
 
 
-def test_layer1_balanced_sampler_tracks_target_ratio() -> None:
+def test_layer1_high_recall_sampler_tracks_candidate_policy() -> None:
     cohort_types = ["pca"] * 60 + ["nca"] * 30
-    sampler = Layer1BalancedBatchSampler(cohort_types, batch_size=3, steps_per_epoch=500, seed=7)
+    sampler = Layer1HighRecallBatchSampler(cohort_types, batch_size=4, steps_per_epoch=500, seed=7)
 
-    pca_count = 0
-    nca_count = 0
+    counts = {"pca_lesion": 0, "nca_mimic": 0, "random_gland": 0}
     for batch in sampler:
-        for idx in batch:
-            if cohort_types[idx] == "pca":
-                pca_count += 1
-            else:
-                nca_count += 1
+        for index, mode in batch:
+            assert cohort_types[index] in {"pca", "nca"}
+            counts[mode] += 1
 
-    ratio = pca_count / max(nca_count, 1)
-    assert 1.7 <= ratio <= 2.3
-
-
-def test_layer1_crop_modes_match_expected_bias() -> None:
-    rng = random.Random(123)
-    pca_modes = [choose_layer1_crop_mode("pca", rng).mode for _ in range(600)]
-    nca_modes = [choose_layer1_crop_mode("nca", rng).mode for _ in range(600)]
-
-    pca_pos_ratio = pca_modes.count("lesion_positive") / len(pca_modes)
-    nca_boundary_ratio = nca_modes.count("wg_or_boundary_background") / len(nca_modes)
-
-    assert 0.58 <= pca_pos_ratio <= 0.75
-    assert 0.42 <= nca_boundary_ratio <= 0.58
+    total = sum(counts.values())
+    assert abs(counts["pca_lesion"] / total - 0.50) < 0.05
+    assert abs(counts["nca_mimic"] / total - 0.25) < 0.05
+    assert abs(counts["random_gland"] / total - 0.25) < 0.05

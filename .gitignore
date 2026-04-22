@@ -55,6 +55,7 @@ ENV/
 *.log
 *.tmp
 *.bak
+*.orig
 
 # ------------------------------
 # Training artifacts / checkpoints
@@ -96,6 +97,10 @@ ENV/
 # Project-specific generated data
 # ------------------------------
 data/exports/
+data/qc/
+data/geometry_fixed/*
+!data/geometry_fixed/geometry_fix_report.csv
+!data/geometry_fixed/geometry_fix_report.json
 data/manifest/*.jsonl
 data/manifest/*.csv
 data/manifest/*.json
@@ -116,6 +121,9 @@ MedNeXt_results/
 SegMamba_data/
 SegMamba_runs/
 SegMamba_predictions/
+segmamba_data/
+segmamba_runs/
+segmamba_predictions/
 
 nnFormer_data/
 nnFormer_preprocessed/
@@ -123,3 +131,7 @@ nnFormer_results/
 nnFormer_raw_data/
 nnFormer_cropped_data/
 RESULTS_FOLDER/
+
+wandb/
+lightning_logs/
+runs/

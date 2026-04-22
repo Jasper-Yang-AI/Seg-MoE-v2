@@ -24,6 +24,11 @@ def _make_case(case_id: str) -> CaseManifestRow:
     )
 
 
+def _make_nca_case(case_id: str) -> CaseManifestRow:
+    row = _make_case(case_id)
+    return CaseManifestRow(**{**row.to_dict(), "cohort_type": "nca"})
+
+
 def test_layer1_dataset_stacks_modalities_and_priors() -> None:
     row = _make_case("case_a")
     priors = {
@@ -53,11 +58,49 @@ def test_layer1_dataset_stacks_modalities_and_priors() -> None:
         case_cache=case_cache,
         seed=1,
     )
-    image, target, meta = dataset[0]
+    image, target, voxel_weight, meta = dataset[0]
 
     assert image.shape == (6, 4, 4, 4)
     assert target.shape == (4, 4, 4)
+    assert voxel_weight.shape == (4, 4, 4)
+    assert float(voxel_weight.max()) == 1.25
     assert meta["case_id"] == row.case_id
+
+
+def test_layer1_dataset_treats_nca_mimic_as_positive_for_high_recall() -> None:
+    row = _make_nca_case("case_nca")
+    priors = {
+        row.case_id: {
+            "P_WG": np.ones((8, 8, 8), dtype=np.float32) * 0.8,
+            "P_PZ": np.ones((8, 8, 8), dtype=np.float32) * 0.3,
+            "P_TZ": np.ones((8, 8, 8), dtype=np.float32) * 0.7,
+        }
+    }
+    label = np.zeros((8, 8, 8), dtype=np.int16)
+    label[2:5, 2:5, 2:5] = 3
+    case_cache = {
+        row.case_id: CaseArrays(
+            modalities={
+                "T2W": np.ones((8, 8, 8), dtype=np.float32),
+                "ADC": np.ones((8, 8, 8), dtype=np.float32) * 2,
+                "DWI": np.ones((8, 8, 8), dtype=np.float32) * 3,
+            },
+            label=label,
+            anatomy_priors=priors[row.case_id],
+        )
+    }
+    dataset = Layer1LesionDataset(
+        [row],
+        patch_size=(4, 4, 4),
+        anatomy_prior_map=priors,
+        case_cache=case_cache,
+        seed=1,
+    )
+    _image, target, voxel_weight, meta = dataset[(0, "nca_mimic")]
+
+    assert int(target.max()) == 1
+    assert float(voxel_weight.min()) == 0.75
+    assert meta["requested_crop_mode"] == "nca_mimic"
 
 
 def test_layer2_dataset_outputs_expected_channel_count_and_fp_weight() -> None:

@@ -97,7 +97,7 @@ class TaskSpec:
             output_heads=("lesion",),
             uses_priors=uses_priors,
             cohort_aware=True,
-            notes="PCA label==3 is positive, NCA lesion target is forced empty.",
+            notes="Layer1 treats PCA label==3 and NCA mimic label==3 as high-recall positives.",
         )
 
 
@@ -110,7 +110,7 @@ class PredictionRecord:
     split: str
     case_id: str
     predictor_fold: int
-    prob_path: Path | str
+    prob_path: Path | str | None = None
     logit_path: Path | str | None = None
     channel_names: tuple[str, ...] = ()
     source_manifest_hash: str = ""

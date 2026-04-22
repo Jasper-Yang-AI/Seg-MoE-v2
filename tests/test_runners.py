@@ -92,14 +92,17 @@ def test_vendored_runners_resolve_default_roots_and_commands(tmp_path: Path) -> 
     assert str(mednext.repo_root) in mednext_env["PYTHONPATH"]
 
     segmamba = SegMambaRunner(workspace=tmp_path)
-    assert segmamba.repo_root.name == "SegMamba-main"
+    assert segmamba.repo_root.name == "SegMamba"
+    config_path = tmp_path / "segmamba_config.json"
+    config_path.write_text("{}", encoding="utf-8")
     segmamba_train = segmamba.train_fold(
         0,
         TaskSpec.lesion(),
         [case],
-        {"dry_run": True},
+        {"dry_run": True, "config": config_path},
     )
-    assert segmamba_train["command"][:2] == [sys.executable, "3_train.py"]
+    assert segmamba_train["command"][:4] == [sys.executable, "-m", "segmoe_v2.segmamba_adapter", "train"]
+    assert "--config" in segmamba_train["command"]
     segmamba_env = segmamba._env(0, "train", {})
     assert str(segmamba.repo_root / "mamba") in segmamba_env["PYTHONPATH"]
     assert str(segmamba.repo_root / "causal-conv1d") in segmamba_env["PYTHONPATH"]

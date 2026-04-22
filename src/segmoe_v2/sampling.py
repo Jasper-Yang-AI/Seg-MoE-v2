@@ -3,45 +3,33 @@ from __future__ import annotations
 import math
 import random
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
+
+LAYER1_HIGH_RECALL_POLICY: dict[str, float] = {
+    "pca_lesion": 0.50,
+    "nca_mimic": 0.25,
+    "random_gland": 0.25,
+}
 
 
-@dataclass(frozen=True, slots=True)
-class Layer1CropChoice:
-    cohort_type: str
-    mode: str
-
-
-def choose_layer1_crop_mode(cohort_type: str, rng: random.Random | None = None) -> Layer1CropChoice:
-    rng = rng or random.Random()
-    cohort_type = str(cohort_type).lower()
-    if cohort_type == "pca":
-        mode = "lesion_positive" if rng.random() < (2.0 / 3.0) else "regular_background"
-    else:
-        mode = "wg_or_boundary_background" if rng.random() < 0.5 else "regular_background"
-    return Layer1CropChoice(cohort_type=cohort_type, mode=mode)
-
-
-class Layer1BalancedBatchSampler:
+class Layer1HighRecallBatchSampler:
     def __init__(
         self,
         cohort_types: Sequence[str],
         *,
         batch_size: int,
-        pca_ratio: float = 2.0 / 3.0,
         steps_per_epoch: int | None = None,
         seed: int = 42,
     ) -> None:
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
         self.batch_size = int(batch_size)
-        self.pca_ratio = float(pca_ratio)
         self.seed = int(seed)
         self.epoch = 0
         self.pca_indices = [idx for idx, cohort in enumerate(cohort_types) if str(cohort).lower() == "pca"]
         self.nca_indices = [idx for idx, cohort in enumerate(cohort_types) if str(cohort).lower() == "nca"]
+        self.all_indices = list(range(len(cohort_types)))
         if not self.pca_indices or not self.nca_indices:
-            raise ValueError("Layer1BalancedBatchSampler requires both PCA and NCA samples")
+            raise ValueError("Layer1HighRecallBatchSampler requires both PCA and NCA samples")
         total = len(cohort_types)
         self.steps_per_epoch = int(steps_per_epoch or max(1, math.ceil(total / self.batch_size)))
 
@@ -51,18 +39,23 @@ class Layer1BalancedBatchSampler:
     def __len__(self) -> int:
         return self.steps_per_epoch
 
-    def __iter__(self) -> Iterator[list[int]]:
-        rng = random.Random(self.seed + self.epoch)
-        for _ in range(self.steps_per_epoch):
-            if self.batch_size == 1:
-                pool = self.pca_indices if rng.random() < self.pca_ratio else self.nca_indices
-                yield [rng.choice(pool)]
-                continue
+    def _mode_counts(self) -> dict[str, int]:
+        if self.batch_size == 1:
+            return {"pca_lesion": 1, "nca_mimic": 0, "random_gland": 0}
+        n_pca = max(1, int(round(self.batch_size * LAYER1_HIGH_RECALL_POLICY["pca_lesion"])))
+        n_nca = max(1, int(round(self.batch_size * LAYER1_HIGH_RECALL_POLICY["nca_mimic"])))
+        if n_pca + n_nca >= self.batch_size:
+            n_nca = max(1, self.batch_size - n_pca)
+        n_random = max(0, self.batch_size - n_pca - n_nca)
+        return {"pca_lesion": n_pca, "nca_mimic": n_nca, "random_gland": n_random}
 
-            n_pca = int(round(self.batch_size * self.pca_ratio))
-            n_pca = min(max(n_pca, 1), self.batch_size - 1)
-            n_nca = self.batch_size - n_pca
-            batch = [rng.choice(self.pca_indices) for _ in range(n_pca)]
-            batch.extend(rng.choice(self.nca_indices) for _ in range(n_nca))
+    def __iter__(self) -> Iterator[list[tuple[int, str]]]:
+        rng = random.Random(self.seed + self.epoch)
+        counts = self._mode_counts()
+        for _ in range(self.steps_per_epoch):
+            batch: list[tuple[int, str]] = []
+            batch.extend((rng.choice(self.pca_indices), "pca_lesion") for _ in range(counts["pca_lesion"]))
+            batch.extend((rng.choice(self.nca_indices), "nca_mimic") for _ in range(counts["nca_mimic"]))
+            batch.extend((rng.choice(self.all_indices), "random_gland") for _ in range(counts["random_gland"]))
             rng.shuffle(batch)
             yield batch

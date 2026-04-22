@@ -13,8 +13,14 @@ from torch.utils.data import Dataset
 
 from .contracts import CaseManifestRow
 from .features import lesion_stats_from_experts
-from .labels import build_anatomy_targets, build_lesion_target
-from .sampling import choose_layer1_crop_mode
+from .labels import (
+    build_anatomy_targets,
+    build_layer1_high_recall_target,
+    build_layer1_lesion_mimic_source,
+    build_layer1_source_weight_map,
+    build_lesion_target,
+)
+from .sampling import LAYER1_HIGH_RECALL_POLICY
 
 
 def load_nifti_zyx(path: str | Path, *, dtype: np.dtype | None = np.float32) -> np.ndarray:
@@ -82,6 +88,15 @@ def _signed_distance(mask: np.ndarray, spacing: tuple[float, float, float]) -> n
     return (inside - outside).astype(np.float32)
 
 
+def _choose_layer1_request_mode(rng: random.Random) -> str:
+    token = rng.random()
+    if token < LAYER1_HIGH_RECALL_POLICY["pca_lesion"]:
+        return "pca_lesion"
+    if token < LAYER1_HIGH_RECALL_POLICY["pca_lesion"] + LAYER1_HIGH_RECALL_POLICY["nca_mimic"]:
+        return "nca_mimic"
+    return "random_gland"
+
+
 @dataclass(frozen=True, slots=True)
 class CaseArrays:
     modalities: dict[str, np.ndarray]
@@ -123,35 +138,57 @@ class Layer1LesionDataset(Dataset):
         priors = self.anatomy_prior_map.get(row.case_id)
         return CaseArrays(modalities=modalities, label=label, anatomy_priors=dict(priors) if priors else None)
 
-    def __getitem__(self, index: int):
+    def __getitem__(self, index: int | tuple[int, str]):
+        forced_mode: str | None = None
+        if isinstance(index, tuple):
+            raw_index, forced_mode = index
+            index = int(raw_index)
         row = self.cases[index]
         rng = random.Random(self.seed + index)
         bundle = self._load_case(row)
 
-        lesion_target = build_lesion_target(bundle.label, row.cohort_type)
+        source_labels = build_layer1_lesion_mimic_source(bundle.label, row.cohort_type)
+        lesion_target = build_layer1_high_recall_target(source_labels)
+        source_weight = build_layer1_source_weight_map(source_labels)
         anatomy = build_anatomy_targets(bundle.label)
         wg_mask = anatomy["WG"]["target"].astype(bool)
-        choice = choose_layer1_crop_mode(row.cohort_type, rng=rng)
-
-        if choice.mode == "lesion_positive" and lesion_target.any():
-            center = _choose_center(lesion_target > 0, rng)
-        elif choice.mode == "wg_or_boundary_background":
-            signed = _signed_distance(wg_mask, row.spacing)
-            candidate = np.logical_or(wg_mask, np.abs(signed) <= 5.0)
-            center = _choose_center(candidate, rng)
+        if bundle.anatomy_priors and "P_WG" in bundle.anatomy_priors:
+            gland_mask = np.asarray(bundle.anatomy_priors["P_WG"]) >= 0.35
         else:
-            center = _choose_center(lesion_target == 0, rng)
+            gland_mask = wg_mask
+        requested_mode = forced_mode or _choose_layer1_request_mode(rng)
+        crop_mode = requested_mode
+        fallback = False
+
+        if requested_mode == "pca_lesion" and np.any(source_labels == 1):
+            center = _choose_center(source_labels == 1, rng)
+        elif requested_mode == "nca_mimic" and np.any(source_labels == 2):
+            center = _choose_center(source_labels == 2, rng)
+        elif requested_mode == "random_gland" and gland_mask.any():
+            center = _choose_center(gland_mask, rng)
+        else:
+            fallback = True
+            crop_mode = "random_gland"
+            center = _choose_center(gland_mask if gland_mask.any() else np.ones_like(lesion_target, dtype=bool), rng)
 
         channels = [bundle.modalities[name] for name in ("T2W", "ADC", "DWI")]
         if bundle.anatomy_priors:
             channels.extend(bundle.anatomy_priors[name] for name in ("P_WG", "P_PZ", "P_TZ"))
         image = np.stack([_extract_patch(arr, center, self.patch_size) for arr in channels], axis=0).astype(np.float32)
         target = _extract_patch(lesion_target, center, self.patch_size).astype(np.uint8)
+        voxel_weight = _extract_patch(source_weight, center, self.patch_size).astype(np.float32)
 
         return (
             torch.from_numpy(image).float(),
             torch.from_numpy(target).float(),
-            {"case_id": row.case_id, "cohort_type": row.cohort_type, "crop_mode": choice.mode},
+            torch.from_numpy(voxel_weight).float(),
+            {
+                "case_id": row.case_id,
+                "cohort_type": row.cohort_type,
+                "requested_crop_mode": requested_mode,
+                "crop_mode": crop_mode,
+                "fallback": fallback,
+            },
         )
 
 

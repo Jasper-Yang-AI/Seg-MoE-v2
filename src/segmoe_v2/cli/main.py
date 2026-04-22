@@ -5,7 +5,14 @@ from pathlib import Path
 from typing import Sequence
 
 from ..anatomy_visual_qc import generate_anatomy_visual_qc
-from ..backend_data import export_mednext_task, export_nnunet_task, prepare_segmamba_data
+from ..backend_data import export_mednext_task, export_nnunet_task, prepare_layer1_moe_data, prepare_segmamba_data
+from ..gland_crop import (
+    DEFAULT_MARGIN_MM,
+    DEFAULT_MIN_CROP_SIZE_ZYX,
+    DEFAULT_WG_THRESHOLD,
+    build_gland_crop_records,
+    write_gland_crop_manifest,
+)
 from ..geometry_audit import (
     GeometryAuditThresholds,
     audit_geometry,
@@ -34,6 +41,7 @@ from ..manifest import (
     scan_case_roots,
     write_manifest_artifacts,
 )
+from ..io_utils import load_jsonl
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -58,12 +66,22 @@ def build_parser() -> argparse.ArgumentParser:
     audit_parser.add_argument("--mednext-splits", required=True)
     audit_parser.add_argument("--segmamba-splits", required=True)
 
+    crop_parser = sub.add_parser("build-gland-crop-manifest", help="Build ROI crop windows from anatomy P_WG probabilities")
+    crop_parser.add_argument("--manifest", required=True)
+    crop_parser.add_argument("--anatomy-predictions", required=True)
+    crop_parser.add_argument("--output", required=True)
+    crop_parser.add_argument("--wg-threshold", type=float, default=DEFAULT_WG_THRESHOLD)
+    crop_parser.add_argument("--margin-mm", type=float, default=DEFAULT_MARGIN_MM)
+    crop_parser.add_argument("--min-crop-size-zyx", nargs=3, type=int, default=list(DEFAULT_MIN_CROP_SIZE_ZYX))
+
     nnunet_export = sub.add_parser("export-nnunet-task", help="Export canonical raw dataset layout for nnUNet")
     nnunet_export.add_argument("--manifest", required=True)
     nnunet_export.add_argument("--task-root", required=True)
     nnunet_export.add_argument("--dataset-id", type=int, required=True)
     nnunet_export.add_argument("--dataset-name", required=True)
     nnunet_export.add_argument("--task", choices=("anatomy", "lesion"), default="lesion")
+    nnunet_export.add_argument("--anatomy-predictions", required=False)
+    nnunet_export.add_argument("--crop-manifest", required=False)
 
     mednext_export = sub.add_parser("export-mednext-task", help="Export canonical raw dataset layout for MedNeXt")
     mednext_export.add_argument("--manifest", required=True)
@@ -71,11 +89,28 @@ def build_parser() -> argparse.ArgumentParser:
     mednext_export.add_argument("--dataset-id", type=int, required=True)
     mednext_export.add_argument("--dataset-name", required=True)
     mednext_export.add_argument("--task", choices=("anatomy", "lesion"), default="lesion")
+    mednext_export.add_argument("--anatomy-predictions", required=False)
+    mednext_export.add_argument("--crop-manifest", required=False)
 
     segmamba_prep = sub.add_parser("prepare-segmamba-data", help="Write dataset index and split lists for SegMamba")
     segmamba_prep.add_argument("--manifest", required=True)
     segmamba_prep.add_argument("--output-dir", required=True)
     segmamba_prep.add_argument("--task", choices=("anatomy", "lesion"), default="lesion")
+    segmamba_prep.add_argument("--anatomy-predictions", required=False)
+    segmamba_prep.add_argument("--crop-manifest", required=False)
+
+    layer1_moe = sub.add_parser("prepare-layer1-moe", help="Export nnU-Net, MedNeXt, and SegMamba Layer1 expert data")
+    layer1_moe.add_argument("--manifest", required=True)
+    layer1_moe.add_argument("--anatomy-predictions", required=True)
+    layer1_moe.add_argument("--crop-manifest", required=True)
+    layer1_moe.add_argument("--config-out", required=True)
+    layer1_moe.add_argument("--nnunet-task-root", default="nnUNet_raw")
+    layer1_moe.add_argument("--nnunet-dataset-id", type=int, default=502)
+    layer1_moe.add_argument("--nnunet-dataset-name", default="ProstateLayer1")
+    layer1_moe.add_argument("--mednext-task-root", default="MedNeXt_raw_data_base/nnUNet_raw_data")
+    layer1_moe.add_argument("--mednext-dataset-id", type=int, default=502)
+    layer1_moe.add_argument("--mednext-dataset-name", default="ProstateLayer1")
+    layer1_moe.add_argument("--segmamba-output-dir", default="data/exports/segmamba")
 
     geometry_audit = sub.add_parser("audit-geometry", help="Audit multimodal geometry consistency for all manifest cases")
     geometry_audit.add_argument("--manifest", required=True)
@@ -168,6 +203,20 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     rows = load_case_manifest(args.manifest)
 
+    if args.command == "build-gland-crop-manifest":
+        prediction_manifest = load_jsonl(args.anatomy_predictions)
+        records = build_gland_crop_records(
+            rows,
+            prediction_manifest,
+            wg_threshold=float(args.wg_threshold),
+            margin_mm=float(args.margin_mm),
+            min_crop_size_zyx=tuple(int(v) for v in args.min_crop_size_zyx),
+        )
+        output = write_gland_crop_manifest(records, args.output)
+        warnings = sum(1 for record in records if record.warning)
+        print(f"Gland crop manifest written to {output} ({len(records)} cases, {warnings} warnings)")
+        return
+
     if args.command == "export-nnunet-task":
         outputs = export_nnunet_task(
             rows,
@@ -175,6 +224,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             dataset_id=int(args.dataset_id),
             dataset_name=args.dataset_name,
             task=args.task,
+            anatomy_prediction_manifest=args.anatomy_predictions,
+            crop_manifest=args.crop_manifest,
         )
         print(f"nnUNet task exported to {outputs['dataset_dir']}")
         return
@@ -186,13 +237,38 @@ def main(argv: Sequence[str] | None = None) -> None:
             dataset_id=int(args.dataset_id),
             dataset_name=args.dataset_name,
             task=args.task,
+            anatomy_prediction_manifest=args.anatomy_predictions,
+            crop_manifest=args.crop_manifest,
         )
         print(f"MedNeXt task exported to {outputs['dataset_dir']}")
         return
 
     if args.command == "prepare-segmamba-data":
-        outputs = prepare_segmamba_data(rows, output_dir=args.output_dir, task=args.task)
+        outputs = prepare_segmamba_data(
+            rows,
+            output_dir=args.output_dir,
+            task=args.task,
+            anatomy_prediction_manifest=args.anatomy_predictions,
+            crop_manifest=args.crop_manifest,
+        )
         print(f"SegMamba data prepared at {outputs['split_metadata'].parent}")
+        return
+
+    if args.command == "prepare-layer1-moe":
+        outputs = prepare_layer1_moe_data(
+            rows,
+            anatomy_prediction_manifest=args.anatomy_predictions,
+            crop_manifest=args.crop_manifest,
+            config_out=args.config_out,
+            nnunet_task_root=args.nnunet_task_root,
+            nnunet_dataset_id=int(args.nnunet_dataset_id),
+            nnunet_dataset_name=args.nnunet_dataset_name,
+            mednext_task_root=args.mednext_task_root,
+            mednext_dataset_id=int(args.mednext_dataset_id),
+            mednext_dataset_name=args.mednext_dataset_name,
+            segmamba_output_dir=args.segmamba_output_dir,
+        )
+        print(f"Layer1 MoE config written to {outputs['layer1_moe_config']}")
         return
 
     if args.command == "audit-geometry":

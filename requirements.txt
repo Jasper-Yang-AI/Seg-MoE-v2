@@ -2,7 +2,7 @@
 #
 # Install PyTorch separately so you can match your CUDA driver/toolkit.
 # After that:
-#   pip install -r requirements/v2-runtime.txt
+#   pip install -r requirements.txt
 #   pip install -e . --no-deps
 
 numpy>=1.26,<2.0
@@ -32,5 +32,5 @@ timm>=0.9
 yacs>=0.1.8
 
 # SegMamba CUDA extensions are intentionally installed from vendored source:
-#   pip install -e src/segmoe_v2/SegMamba-main/causal-conv1d
-#   pip install -e src/segmoe_v2/SegMamba-main/mamba
+#   pip install -e external/SegMamba/causal-conv1d
+#   pip install -e external/SegMamba/mamba
