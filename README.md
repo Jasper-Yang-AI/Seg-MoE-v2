@@ -242,7 +242,7 @@ Train one fold:
 ```bash
 CUDA_VISIBLE_DEVICES=0 python -m nnunet_mednext.run.run_training \
   3d_fullres \
-  nnUNetTrainerV2_MedNeXt_S_kernel3 \
+  nnUNetTrainerV2_MedNeXt_S_kernel3_SegMoELayer1 \
   502 \
   0 \
   -p nnUNetPlansv2.1_trgSp_1x1x1 \
@@ -262,7 +262,7 @@ from anatomy probabilities first:
 ```bash
 python -m segmoe_v2.cli.main build-gland-crop-manifest \
   --manifest data/manifest/cases.geometry_fixed.jsonl \
-  --anatomy-predictions data/exports/anatomy_oof/prediction_manifest.jsonl \
+  --anatomy-predictions data/exports/anatomy_all/prediction_manifest.jsonl \
   --output data/exports/layer1/gland_crop_manifest.jsonl \
   --min-crop-size-zyx 24 192 192
 ```
@@ -281,7 +281,7 @@ python -m segmoe_v2.cli.main prepare-segmamba-data \
   --manifest data/manifest/cases.geometry_fixed.jsonl \
   --output-dir data/exports/segmamba \
   --task lesion \
-  --anatomy-predictions data/exports/anatomy_oof/prediction_manifest.jsonl \
+  --anatomy-predictions data/exports/anatomy_all/prediction_manifest.jsonl \
   --crop-manifest data/exports/layer1/gland_crop_manifest.jsonl
 ```
 
@@ -311,15 +311,18 @@ Layer1 exports are source-aware:
 - background uses weight `1.0`
 
 SegMamba `.npz` arrays contain `seg_source`, `seg_target`, and `voxel_weight`.
-nnU-Net and MedNeXt lesion exports write binary candidate labels plus sidecar
-`sourceLabels*` and `weights*` folders.
+nnU-Net and MedNeXt lesion exports now use the same source labels as their main
+`labelsTr` target; their SegMoE Layer1 trainers map labels `{1,2}` to one
+candidate-positive head and apply the same source-aware weights. The sidecar
+`sourceLabels*` and `weights*` folders remain for audit/QC, not as a substitute
+for the custom trainers.
 
 To prepare all three Layer1 experts from the same manifest/prior/crop contract:
 
 ```bash
 python -m segmoe_v2.cli.main prepare-layer1-moe \
   --manifest data/manifest/cases.geometry_fixed.jsonl \
-  --anatomy-predictions data/exports/anatomy_oof/prediction_manifest.jsonl \
+  --anatomy-predictions data/exports/anatomy_all/prediction_manifest.jsonl \
   --crop-manifest data/exports/layer1/gland_crop_manifest.jsonl \
   --config-out data/exports/layer1/layer1_moe_config.json \
   --nnunet-task-root nnUNet_raw \
@@ -336,6 +339,56 @@ The generated `layer1_moe_config.json` defines the three Layer1 experts:
 - nnU-Net: local boundary expert
 - MedNeXt: large-kernel/multiscale context expert
 - SegMamba: long-range ROI context expert
+
+Before building crops for the full manifest, merge trainval OOF anatomy
+predictions with the anatomy test ensemble manifest:
+
+```bash
+python -m segmoe_v2.cli.main merge-prediction-manifests \
+  --inputs \
+  nnUNet_results/Dataset501_ProstateAnatomy/nnUNetTrainerSegMoEAnatomy__nnUNetResEncUNetMPlans__3d_fullres/fold_0/validation/prediction_manifest.jsonl \
+  nnUNet_results/Dataset501_ProstateAnatomy/nnUNetTrainerSegMoEAnatomy__nnUNetResEncUNetMPlans__3d_fullres/fold_1/validation/prediction_manifest.jsonl \
+  nnUNet_results/Dataset501_ProstateAnatomy/nnUNetTrainerSegMoEAnatomy__nnUNetResEncUNetMPlans__3d_fullres/fold_2/validation/prediction_manifest.jsonl \
+  nnUNet_results/Dataset501_ProstateAnatomy/nnUNetTrainerSegMoEAnatomy__nnUNetResEncUNetMPlans__3d_fullres/fold_3/validation/prediction_manifest.jsonl \
+  nnUNet_results/Dataset501_ProstateAnatomy/nnUNetTrainerSegMoEAnatomy__nnUNetResEncUNetMPlans__3d_fullres/fold_4/validation/prediction_manifest.jsonl \
+  data/exports/anatomy_test/prediction_manifest.jsonl \
+  --output data/exports/anatomy_all/prediction_manifest.jsonl
+```
+
+Train Layer1 nnU-Net with:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 python -m nnunetv2.run.run_training \
+  502 3d_fullres 0 \
+  -tr nnUNetTrainerSegMoELayer1 \
+  -p nnUNetResEncUNetMPlans \
+  -num_gpus 2 \
+  --npz
+```
+
+Train Layer1 MedNeXt with:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -m nnunet_mednext.run.run_training \
+  3d_fullres \
+  nnUNetTrainerV2_MedNeXt_S_kernel3_SegMoELayer1 \
+  502 \
+  0 \
+  -p nnUNetPlansv2.1_trgSp_1x1x1 \
+  --npz
+```
+
+Build MedNeXt validation manifests after each fold:
+
+```bash
+python -m segmoe_v2.cli.main build-layer1-prediction-manifest \
+  --prediction-dir MedNeXt_results/nnUNet/3d_fullres/Task502_ProstateLayer1/nnUNetTrainerV2_MedNeXt_S_kernel3_SegMoELayer1__nnUNetPlansv2.1_trgSp_1x1x1/fold_0/validation_raw \
+  --dataset-index MedNeXt_raw_data_base/nnUNet_raw_data/Task502_ProstateLayer1/dataset_index.jsonl \
+  --model-name MedNeXt \
+  --fold 0 \
+  --split val \
+  --output data/exports/layer1/mednext_fold0_val_prediction_manifest.jsonl
+```
 
 The `SegMambaRunner` resolves `external/SegMamba` and injects:
 

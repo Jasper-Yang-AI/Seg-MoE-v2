@@ -42,6 +42,7 @@ from ..manifest import (
     write_manifest_artifacts,
 )
 from ..io_utils import load_jsonl
+from ..prediction_manifests import build_layer1_prediction_manifest, merge_prediction_manifest_files
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -82,6 +83,8 @@ def build_parser() -> argparse.ArgumentParser:
     nnunet_export.add_argument("--task", choices=("anatomy", "lesion"), default="lesion")
     nnunet_export.add_argument("--anatomy-predictions", required=False)
     nnunet_export.add_argument("--crop-manifest", required=False)
+    nnunet_export.add_argument("--layer1-main-label-mode", choices=("source", "binary"), default="source")
+    nnunet_export.add_argument("--include-test-labels", action="store_true")
 
     mednext_export = sub.add_parser("export-mednext-task", help="Export canonical raw dataset layout for MedNeXt")
     mednext_export.add_argument("--manifest", required=True)
@@ -91,6 +94,8 @@ def build_parser() -> argparse.ArgumentParser:
     mednext_export.add_argument("--task", choices=("anatomy", "lesion"), default="lesion")
     mednext_export.add_argument("--anatomy-predictions", required=False)
     mednext_export.add_argument("--crop-manifest", required=False)
+    mednext_export.add_argument("--layer1-main-label-mode", choices=("source", "binary"), default="source")
+    mednext_export.add_argument("--include-test-labels", action="store_true")
 
     segmamba_prep = sub.add_parser("prepare-segmamba-data", help="Write dataset index and split lists for SegMamba")
     segmamba_prep.add_argument("--manifest", required=True)
@@ -98,6 +103,7 @@ def build_parser() -> argparse.ArgumentParser:
     segmamba_prep.add_argument("--task", choices=("anatomy", "lesion"), default="lesion")
     segmamba_prep.add_argument("--anatomy-predictions", required=False)
     segmamba_prep.add_argument("--crop-manifest", required=False)
+    segmamba_prep.add_argument("--include-test-labels", action="store_true")
 
     layer1_moe = sub.add_parser("prepare-layer1-moe", help="Export nnU-Net, MedNeXt, and SegMamba Layer1 expert data")
     layer1_moe.add_argument("--manifest", required=True)
@@ -153,6 +159,22 @@ def build_parser() -> argparse.ArgumentParser:
     anatomy_qc.add_argument("--geometry-fix-count", type=int, default=2)
     anatomy_qc.add_argument("--seed", type=int, default=42)
 
+    merge_predictions = sub.add_parser("merge-prediction-manifests", help="Merge OOF/test prediction manifests")
+    merge_predictions.add_argument("--inputs", nargs="+", required=True)
+    merge_predictions.add_argument("--output", required=True)
+
+    layer1_predictions = sub.add_parser(
+        "build-layer1-prediction-manifest",
+        help="Create a Layer1 prediction manifest from nnU-Net or MedNeXt .npz outputs",
+    )
+    layer1_predictions.add_argument("--prediction-dir", required=True)
+    layer1_predictions.add_argument("--dataset-index", required=True)
+    layer1_predictions.add_argument("--output", required=True)
+    layer1_predictions.add_argument("--model-name", required=True)
+    layer1_predictions.add_argument("--fold", type=int, required=True)
+    layer1_predictions.add_argument("--split", default="val")
+    layer1_predictions.add_argument("--allow-missing", action="store_true")
+
     return parser
 
 
@@ -201,6 +223,24 @@ def main(argv: Sequence[str] | None = None) -> None:
             raise SystemExit(1)
         return
 
+    if args.command == "merge-prediction-manifests":
+        output = merge_prediction_manifest_files(args.inputs, args.output)
+        print(f"Prediction manifest written to {output}")
+        return
+
+    if args.command == "build-layer1-prediction-manifest":
+        output = build_layer1_prediction_manifest(
+            prediction_dir=args.prediction_dir,
+            dataset_index=args.dataset_index,
+            output=args.output,
+            model_name=args.model_name,
+            fold=int(args.fold),
+            split=args.split,
+            allow_missing=bool(args.allow_missing),
+        )
+        print(f"Layer1 prediction manifest written to {output}")
+        return
+
     rows = load_case_manifest(args.manifest)
 
     if args.command == "build-gland-crop-manifest":
@@ -226,6 +266,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             task=args.task,
             anatomy_prediction_manifest=args.anatomy_predictions,
             crop_manifest=args.crop_manifest,
+            layer1_main_label_mode=args.layer1_main_label_mode,
+            include_test_labels=bool(args.include_test_labels),
         )
         print(f"nnUNet task exported to {outputs['dataset_dir']}")
         return
@@ -239,6 +281,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             task=args.task,
             anatomy_prediction_manifest=args.anatomy_predictions,
             crop_manifest=args.crop_manifest,
+            layer1_main_label_mode=args.layer1_main_label_mode,
+            include_test_labels=bool(args.include_test_labels),
         )
         print(f"MedNeXt task exported to {outputs['dataset_dir']}")
         return
@@ -250,6 +294,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             task=args.task,
             anatomy_prediction_manifest=args.anatomy_predictions,
             crop_manifest=args.crop_manifest,
+            include_test_labels=bool(args.include_test_labels),
         )
         print(f"SegMamba data prepared at {outputs['split_metadata'].parent}")
         return

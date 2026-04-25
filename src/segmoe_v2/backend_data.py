@@ -42,6 +42,7 @@ from .labels import (
 
 
 TaskName = Literal["anatomy", "lesion"]
+Layer1MainLabelMode = Literal["binary", "source"]
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9]+")
 LAYER1_INPUT_CHANNELS = ("T2W", "ADC", "DWI", "P_WG", "P_PZ", "P_TZ")
 LAYER1_POSITIVE_LABEL_VALUES = LAYER1_CANDIDATE_POSITIVE_LABEL_VALUES
@@ -253,6 +254,7 @@ def _export_label_bundle_for_task(
     source_destination: str | Path | None = None,
     weight_destination: str | Path | None = None,
     bbox_zyx: tuple[int, int, int, int, int, int] | None = None,
+    layer1_main_label_mode: Layer1MainLabelMode = "source",
 ) -> dict[str, Path]:
     destination = Path(destination)
     if task == "anatomy":
@@ -262,8 +264,9 @@ def _export_label_bundle_for_task(
 
     image = nib.load(str(row.label_path))
     source, target, weights = _layer1_source_target_weight_from_image(image, row.cohort_type, bbox_zyx=bbox_zyx)
+    main_label = source if layer1_main_label_mode == "source" else target
     outputs = {
-        "label": _save_nifti_xyz(target, reference_image=image, destination=destination, bbox_zyx=bbox_zyx)
+        "label": _save_nifti_xyz(main_label, reference_image=image, destination=destination, bbox_zyx=bbox_zyx)
     }
     if source_destination is not None:
         outputs["source_label"] = _save_nifti_xyz(
@@ -288,6 +291,7 @@ def _build_dataset_records(
     task: TaskName,
     prediction_index: Mapping[str, Mapping[str, Any]] | None = None,
     crop_index: Mapping[str, GlandCropRecord] | None = None,
+    include_test_labels: bool = False,
 ) -> list[dict[str, Any]]:
     materialized = list(rows)
     manifest_hash = stable_hash([row.to_dict() for row in materialized])
@@ -312,6 +316,8 @@ def _build_dataset_records(
             metadata["sampling_policy"] = dict(LAYER1_SAMPLING_POLICY)
             metadata["background_weight"] = float(LAYER1_BACKGROUND_WEIGHT)
             metadata["source_positive_weights"] = {str(k): float(v) for k, v in LAYER1_SOURCE_AWARE_WEIGHTS.items()}
+        labels_available = row.fixed_split == "trainval" or include_test_labels
+        metadata["labels_available"] = labels_available
         image_channels = [str(row.t2w_path), str(row.adc_path), str(row.dwi_path)]
         prior_record = prediction_index.get(row.case_id)
         anatomy_priors: dict[str, str] = {}
@@ -328,10 +334,10 @@ def _build_dataset_records(
                 "val_fold": row.val_fold,
                 "task": task,
                 "image": image_channels,
-                "label": str(row.label_path),
+                "label": str(row.label_path) if labels_available else "",
                 "anatomy_priors": anatomy_priors,
-                "has_lesion_label3": row.has_lesion_label3,
-                "label_unique_values": list(row.label_unique_values),
+                "has_lesion_label3": row.has_lesion_label3 if labels_available else False,
+                "label_unique_values": list(row.label_unique_values) if labels_available else [],
                 "output_heads": _task_output_heads(task),
                 "probability_channels": _task_probability_channels(task),
                 "source_manifest_hash": manifest_hash,
@@ -347,6 +353,8 @@ def _build_dataset_json(
     dataset_name: str,
     task: TaskName,
     with_anatomy_priors: bool = False,
+    layer1_main_label_mode: Layer1MainLabelMode = "source",
+    include_test_labels: bool = False,
 ) -> dict[str, Any]:
     manifest_hash = stable_hash([row.to_dict() for row in rows])
     channel_names = {"0": "T2W", "1": "ADC", "2": "DWI"}
@@ -366,13 +374,20 @@ def _build_dataset_json(
         base["labels"] = {"background": 0, "PZ": 1, "TZ": 2, "lesion": 3}
         base["segmoe_target_adapter"] = "nnUNetTrainerSegMoEAnatomy"
     else:
-        base["labels"] = {"background": 0, "candidate": 1}
-        base["segmoe_target_adapter"] = "layer1_high_recall_label1_or_label2_positive"
+        if layer1_main_label_mode == "source":
+            base["labels"] = {"background": 0, "pca_lesion": 1, "nca_mimic": 2}
+            base["segmoe_target_adapter"] = "layer1_source_aware_label1_or_label2_positive"
+            base["segmoe_main_label_mode"] = "source"
+        else:
+            base["labels"] = {"background": 0, "candidate": 1}
+            base["segmoe_target_adapter"] = "layer1_high_recall_label1_or_label2_positive"
+            base["segmoe_main_label_mode"] = "binary"
         base["segmoe_positive_label_values"] = list(LAYER1_POSITIVE_LABEL_VALUES)
         base["segmoe_source_label_values"] = {"background": 0, "pca_lesion": 1, "nca_mimic": 2}
         base["segmoe_background_weight"] = float(LAYER1_BACKGROUND_WEIGHT)
         base["segmoe_source_positive_weights"] = {str(k): float(v) for k, v in LAYER1_SOURCE_AWARE_WEIGHTS.items()}
         base["segmoe_sampling_policy"] = dict(LAYER1_SAMPLING_POLICY)
+        base["segmoe_include_test_labels"] = bool(include_test_labels)
         base["segmoe_sidecars"] = {
             "source_labels": {"train": "sourceLabelsTr", "test": "sourceLabelsTs"},
             "voxel_weights": {"train": "weightsTr", "test": "weightsTs"},
@@ -389,6 +404,8 @@ def export_nnunet_task(
     task: TaskName = "lesion",
     anatomy_prediction_manifest: str | Path | None = None,
     crop_manifest: str | Path | Iterable[GlandCropRecord] | None = None,
+    layer1_main_label_mode: Layer1MainLabelMode = "source",
+    include_test_labels: bool = False,
 ) -> dict[str, Path]:
     materialized = list(rows)
     prediction_index = _load_prediction_index(anatomy_prediction_manifest)
@@ -403,11 +420,15 @@ def export_nnunet_task(
     labels_ts = dataset_dir / "labelsTs"
     source_labels_ts = dataset_dir / "sourceLabelsTs"
     weights_ts = dataset_dir / "weightsTs"
-    sidecar_dirs = (source_labels_tr, weights_tr, source_labels_ts, weights_ts) if task == "lesion" else ()
-    for directory in (images_tr, labels_tr, images_ts, labels_ts, *sidecar_dirs):
+    train_sidecar_dirs = (source_labels_tr, weights_tr) if task == "lesion" else ()
+    test_label_dirs = (labels_ts, source_labels_ts, weights_ts) if include_test_labels and task == "lesion" else (
+        (labels_ts,) if include_test_labels else ()
+    )
+    for directory in (images_tr, labels_tr, images_ts, *train_sidecar_dirs, *test_label_dirs):
         directory.mkdir(parents=True, exist_ok=True)
 
     for row in materialized:
+        labels_available = row.fixed_split == "trainval" or include_test_labels
         target_images = images_tr if row.fixed_split == "trainval" else images_ts
         target_labels = labels_tr if row.fixed_split == "trainval" else labels_ts
         target_source_labels = source_labels_tr if row.fixed_split == "trainval" else source_labels_ts
@@ -429,14 +450,16 @@ def export_nnunet_task(
                     destination=target_images / f"{row.case_id}_{channel_idx:04d}.nii.gz",
                     bbox_zyx=bbox,
                 )
-        _export_label_bundle_for_task(
-            row,
-            task=task,
-            destination=target_labels / f"{row.case_id}.nii.gz",
-            source_destination=target_source_labels / f"{row.case_id}.nii.gz" if task == "lesion" else None,
-            weight_destination=target_weights / f"{row.case_id}.nii.gz" if task == "lesion" else None,
-            bbox_zyx=bbox,
-        )
+        if labels_available:
+            _export_label_bundle_for_task(
+                row,
+                task=task,
+                destination=target_labels / f"{row.case_id}.nii.gz",
+                source_destination=target_source_labels / f"{row.case_id}.nii.gz" if task == "lesion" else None,
+                weight_destination=target_weights / f"{row.case_id}.nii.gz" if task == "lesion" else None,
+                bbox_zyx=bbox,
+                layer1_main_label_mode=layer1_main_label_mode,
+            )
 
     outputs = {
         "dataset_dir": dataset_dir,
@@ -446,6 +469,8 @@ def export_nnunet_task(
                 dataset_name=dataset_name,
                 task=task,
                 with_anatomy_priors=with_anatomy_priors,
+                layer1_main_label_mode=layer1_main_label_mode,
+                include_test_labels=include_test_labels,
             ),
             dataset_dir / "dataset.json",
         ),
@@ -465,6 +490,7 @@ def export_nnunet_task(
                 task=task,
                 prediction_index=prediction_index,
                 crop_index=crop_index,
+                include_test_labels=include_test_labels,
             ),
             dataset_dir / "dataset_index.jsonl",
         ),
@@ -481,6 +507,8 @@ def export_mednext_task(
     task: TaskName = "lesion",
     anatomy_prediction_manifest: str | Path | None = None,
     crop_manifest: str | Path | Iterable[GlandCropRecord] | None = None,
+    layer1_main_label_mode: Layer1MainLabelMode = "source",
+    include_test_labels: bool = False,
 ) -> dict[str, Path]:
     materialized = list(rows)
     prediction_index = _load_prediction_index(anatomy_prediction_manifest)
@@ -495,11 +523,15 @@ def export_mednext_task(
     labels_ts = dataset_dir / "labelsTs"
     source_labels_ts = dataset_dir / "sourceLabelsTs"
     weights_ts = dataset_dir / "weightsTs"
-    sidecar_dirs = (source_labels_tr, weights_tr, source_labels_ts, weights_ts) if task == "lesion" else ()
-    for directory in (images_tr, labels_tr, images_ts, labels_ts, *sidecar_dirs):
+    train_sidecar_dirs = (source_labels_tr, weights_tr) if task == "lesion" else ()
+    test_label_dirs = (labels_ts, source_labels_ts, weights_ts) if include_test_labels and task == "lesion" else (
+        (labels_ts,) if include_test_labels else ()
+    )
+    for directory in (images_tr, labels_tr, images_ts, *train_sidecar_dirs, *test_label_dirs):
         directory.mkdir(parents=True, exist_ok=True)
 
     for row in materialized:
+        labels_available = row.fixed_split == "trainval" or include_test_labels
         target_images = images_tr if row.fixed_split == "trainval" else images_ts
         target_labels = labels_tr if row.fixed_split == "trainval" else labels_ts
         target_source_labels = source_labels_tr if row.fixed_split == "trainval" else source_labels_ts
@@ -521,14 +553,16 @@ def export_mednext_task(
                     destination=target_images / f"{row.case_id}_{channel_idx:04d}.nii.gz",
                     bbox_zyx=bbox,
                 )
-        _export_label_bundle_for_task(
-            row,
-            task=task,
-            destination=target_labels / f"{row.case_id}.nii.gz",
-            source_destination=target_source_labels / f"{row.case_id}.nii.gz" if task == "lesion" else None,
-            weight_destination=target_weights / f"{row.case_id}.nii.gz" if task == "lesion" else None,
-            bbox_zyx=bbox,
-        )
+        if labels_available:
+            _export_label_bundle_for_task(
+                row,
+                task=task,
+                destination=target_labels / f"{row.case_id}.nii.gz",
+                source_destination=target_source_labels / f"{row.case_id}.nii.gz" if task == "lesion" else None,
+                weight_destination=target_weights / f"{row.case_id}.nii.gz" if task == "lesion" else None,
+                bbox_zyx=bbox,
+                layer1_main_label_mode=layer1_main_label_mode,
+            )
 
     train_ids = sorted(row.case_id for row in materialized if row.fixed_split == "trainval")
     test_ids = sorted(row.case_id for row in materialized if row.fixed_split == "test")
@@ -556,8 +590,14 @@ def export_mednext_task(
         dataset_json["labels"] = {"0": "background", "1": "PZ", "2": "TZ", "3": "lesion"}
         dataset_json["segmoe_target_adapter"] = "multiclass_anatomy_labels"
     else:
-        dataset_json["labels"] = {"0": "background", "1": "candidate"}
-        dataset_json["segmoe_target_adapter"] = "layer1_high_recall_label1_or_label2_positive"
+        if layer1_main_label_mode == "source":
+            dataset_json["labels"] = {"0": "background", "1": "pca_lesion", "2": "nca_mimic"}
+            dataset_json["segmoe_target_adapter"] = "layer1_source_aware_label1_or_label2_positive"
+            dataset_json["segmoe_main_label_mode"] = "source"
+        else:
+            dataset_json["labels"] = {"0": "background", "1": "candidate"}
+            dataset_json["segmoe_target_adapter"] = "layer1_high_recall_label1_or_label2_positive"
+            dataset_json["segmoe_main_label_mode"] = "binary"
         dataset_json["segmoe_positive_label_values"] = list(LAYER1_POSITIVE_LABEL_VALUES)
         dataset_json["segmoe_source_label_values"] = {"0": "background", "1": "pca_lesion", "2": "nca_mimic"}
         dataset_json["segmoe_background_weight"] = float(LAYER1_BACKGROUND_WEIGHT)
@@ -565,6 +605,7 @@ def export_mednext_task(
             str(k): float(v) for k, v in LAYER1_SOURCE_AWARE_WEIGHTS.items()
         }
         dataset_json["segmoe_sampling_policy"] = dict(LAYER1_SAMPLING_POLICY)
+        dataset_json["segmoe_include_test_labels"] = bool(include_test_labels)
         dataset_json["segmoe_sidecars"] = {
             "source_labels": {"train": "sourceLabelsTr", "test": "sourceLabelsTs"},
             "voxel_weights": {"train": "weightsTr", "test": "weightsTs"},
@@ -589,6 +630,7 @@ def export_mednext_task(
                 task=task,
                 prediction_index=prediction_index,
                 crop_index=crop_index,
+                include_test_labels=include_test_labels,
             ),
             dataset_dir / "dataset_index.jsonl",
         ),
@@ -603,6 +645,7 @@ def prepare_segmamba_data(
     task: TaskName = "lesion",
     anatomy_prediction_manifest: str | Path | None = None,
     crop_manifest: str | Path | Iterable[GlandCropRecord] | None = None,
+    include_test_labels: bool = False,
 ) -> dict[str, Path]:
     materialized = list(rows)
     output_dir = Path(output_dir)
@@ -616,6 +659,7 @@ def prepare_segmamba_data(
         task=task,
         prediction_index=prediction_index,
         crop_index=crop_index,
+        include_test_labels=include_test_labels,
     )
     if with_anatomy_priors:
         arrays_dir = output_dir / "arrays"
@@ -636,12 +680,18 @@ def prepare_segmamba_data(
                 _crop_zyx(priors["P_TZ"], bbox),
             ]
             data = np.stack(channels, axis=0).astype(np.float32)
-            label_image = nib.load(str(row.label_path))
-            source_xyz = _layer1_source_label_from_image(label_image, row.cohort_type)
-            source_zyx = np.transpose(source_xyz, (2, 1, 0))
-            seg_source = _crop_zyx(source_zyx, bbox).astype(np.uint8)
-            seg_target = build_layer1_high_recall_target(seg_source).astype(np.uint8)
-            voxel_weight = build_layer1_source_weight_map(seg_source).astype(np.float32)
+            labels_available = row.fixed_split == "trainval" or include_test_labels
+            if labels_available:
+                label_image = nib.load(str(row.label_path))
+                source_xyz = _layer1_source_label_from_image(label_image, row.cohort_type)
+                source_zyx = np.transpose(source_xyz, (2, 1, 0))
+                seg_source = _crop_zyx(source_zyx, bbox).astype(np.uint8)
+                seg_target = build_layer1_high_recall_target(seg_source).astype(np.uint8)
+                voxel_weight = build_layer1_source_weight_map(seg_source).astype(np.float32)
+            else:
+                seg_source = np.zeros(data.shape[1:], dtype=np.uint8)
+                seg_target = np.zeros(data.shape[1:], dtype=np.uint8)
+                voxel_weight = np.ones(data.shape[1:], dtype=np.float32)
             array_path = arrays_dir / f"{row.case_id}.npz"
             np.savez_compressed(
                 array_path,
@@ -662,7 +712,8 @@ def prepare_segmamba_data(
             )
             record["segmamba_npz"] = str(array_path)
             record["image"] = str(array_path)
-            record["label"] = str(array_path)
+            record["label"] = str(array_path) if labels_available else ""
+            record.setdefault("metadata", {})["labels_available"] = labels_available
 
     channel_names = list(LAYER1_INPUT_CHANNELS if with_anatomy_priors else ("T2W", "ADC", "DWI"))
     split_metadata: dict[str, Any] = {
@@ -683,6 +734,7 @@ def prepare_segmamba_data(
         "crop_manifest": str(crop_manifest) if isinstance(crop_manifest, (str, Path)) else "",
         "anatomy_prediction_manifest": str(anatomy_prediction_manifest) if anatomy_prediction_manifest else "",
         "logit_output": {"primary": True, "field": "logits", "space": "roi_crop"},
+        "include_test_labels": bool(include_test_labels),
         "total_cases": len(materialized),
         "test_cases": sorted(row.case_id for row in materialized if row.fixed_split == "test"),
         "folds": {},
@@ -737,6 +789,7 @@ def prepare_segmamba_data(
             "crop_manifest": str(crop_manifest) if isinstance(crop_manifest, (str, Path)) else "",
             "anatomy_prediction_manifest": str(anatomy_prediction_manifest) if anatomy_prediction_manifest else "",
             "logit_output": {"primary": True, "field": "logits", "space": "roi_crop"},
+            "include_test_labels": bool(include_test_labels),
         },
         output_dir / "segmamba_config.json",
     )
@@ -767,6 +820,7 @@ def prepare_layer1_moe_data(
         task="lesion",
         anatomy_prediction_manifest=anatomy_prediction_manifest,
         crop_manifest=crop_manifest,
+        layer1_main_label_mode="source",
     )
     mednext_outputs = export_mednext_task(
         materialized,
@@ -776,6 +830,7 @@ def prepare_layer1_moe_data(
         task="lesion",
         anatomy_prediction_manifest=anatomy_prediction_manifest,
         crop_manifest=crop_manifest,
+        layer1_main_label_mode="source",
     )
     segmamba_outputs = prepare_segmamba_data(
         materialized,
@@ -801,6 +856,8 @@ def prepare_layer1_moe_data(
                 "nnunet": {
                     "role": "local_boundary_expert",
                     "preference": "standard nnU-Net local patch recipe",
+                    "trainer": "nnUNetTrainerSegMoELayer1",
+                    "main_label_mode": "source",
                     "dataset_id": int(nnunet_dataset_id),
                     "dataset_name": str(nnunet_dataset_name),
                     "dataset_dir": str(nnunet_outputs["dataset_dir"]),
@@ -811,6 +868,8 @@ def prepare_layer1_moe_data(
                 "mednext": {
                     "role": "large_kernel_multiscale_context_expert",
                     "preference": "larger effective receptive field and stronger multiscale augmentation",
+                    "trainer": "nnUNetTrainerV2_MedNeXt_S_kernel3_SegMoELayer1",
+                    "main_label_mode": "source",
                     "dataset_id": int(mednext_dataset_id),
                     "dataset_name": str(mednext_dataset_name),
                     "dataset_dir": str(mednext_outputs["dataset_dir"]),
@@ -821,6 +880,8 @@ def prepare_layer1_moe_data(
                 "segmamba": {
                     "role": "long_range_roi_context_expert",
                     "preference": "full ROI prediction with longest feasible z-context",
+                    "trainer": "segmoe_v2.segmamba_adapter",
+                    "main_label_mode": "source_npz_seg_source",
                     "output_dir": str(Path(segmamba_output_dir)),
                     "dataset_index": str(segmamba_outputs["dataset_index"]),
                     "split_metadata": str(segmamba_outputs["split_metadata"]),

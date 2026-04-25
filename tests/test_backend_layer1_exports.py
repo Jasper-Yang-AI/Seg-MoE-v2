@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -116,7 +117,8 @@ def test_layer1_backend_exports_crop_six_channels_and_tristate_labels(tmp_path: 
 
     dataset_json = __import__("json").loads(Path(outputs["dataset_json"]).read_text(encoding="utf-8"))
     assert dataset_json["channel_names"]["5"] == "P_TZ"
-    assert dataset_json["labels"] == {"background": 0, "candidate": 1}
+    assert dataset_json["labels"] == {"background": 0, "pca_lesion": 1, "nca_mimic": 2}
+    assert dataset_json["segmoe_main_label_mode"] == "source"
     assert dataset_json["segmoe_source_positive_weights"] == {"1": 1.25, "2": 0.75}
     assert any(path.endswith("pca_a_0005.nii.gz") for path in saved)
     pca_label = next(array for path, array in saved.items() if path.endswith("labelsTr/pca_a.nii.gz"))
@@ -125,7 +127,7 @@ def test_layer1_backend_exports_crop_six_channels_and_tristate_labels(tmp_path: 
     pca_weight = next(array for path, array in saved.items() if path.endswith("weightsTr/pca_a.nii.gz"))
     nca_weight = next(array for path, array in saved.items() if path.endswith("weightsTr/nca_a.nii.gz"))
     assert set(np.unique(pca_label).tolist()) == {0, 1}
-    assert set(np.unique(nca_label).tolist()) == {0, 1}
+    assert set(np.unique(nca_label).tolist()) == {0, 2}
     assert set(np.unique(nca_source).tolist()) == {0, 2}
     assert np.isclose(float(pca_weight.max()), 1.25)
     assert np.isclose(float(nca_weight.min()), 0.75)
@@ -189,5 +191,56 @@ def test_prepare_layer1_moe_writes_shared_three_expert_config(tmp_path: Path) ->
     assert config["expert_names"] == ["nnunet", "mednext", "segmamba"]
     assert config["source_positive_weights"] == {"1": 1.25, "2": 0.75}
     assert config["experts"]["nnunet"]["role"] == "local_boundary_expert"
+    assert config["experts"]["nnunet"]["trainer"] == "nnUNetTrainerSegMoELayer1"
     assert config["experts"]["mednext"]["role"] == "large_kernel_multiscale_context_expert"
+    assert config["experts"]["mednext"]["trainer"] == "nnUNetTrainerV2_MedNeXt_S_kernel3_SegMoELayer1"
     assert config["experts"]["segmamba"]["role"] == "long_range_roi_context_expert"
+    assert config["experts"]["segmamba"]["main_label_mode"] == "source_npz_seg_source"
+
+
+def test_layer1_exports_do_not_write_test_labels_by_default(tmp_path: Path) -> None:
+    rows = [_case("pca_train", "pca"), replace(_case("nca_test", "nca"), fixed_split="test", val_fold=None)]
+    patched_rows = []
+    for row in rows:
+        paths = {
+            "t2w_path": tmp_path / f"{row.case_id}_0000.nii.gz",
+            "adc_path": tmp_path / f"{row.case_id}_0001.nii.gz",
+            "dwi_path": tmp_path / f"{row.case_id}_0002.nii.gz",
+            "label_path": tmp_path / f"{row.case_id}.nii.gz",
+        }
+        for path in paths.values():
+            path.touch()
+        patched_rows.append(replace(row, **paths))
+    rows = patched_rows
+
+    def fake_load(path: str) -> _Image:
+        data = np.zeros((6, 6, 6), dtype=np.float32)
+        if path.endswith(".nii.gz") and "_000" not in Path(path).name:
+            data = data.astype(np.int16)
+            data[2:4, 2:4, 2:4] = 3
+        return _Image(data)
+
+    saved: dict[str, np.ndarray] = {}
+
+    def fake_save(image: _ExportedImage, path: str) -> None:
+        saved[str(path)] = np.asarray(image.dataobj)
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).touch()
+
+    with patch("segmoe_v2.backend_data.nib.load", side_effect=fake_load), patch(
+        "segmoe_v2.backend_data.nib.save", side_effect=fake_save
+    ), patch("segmoe_v2.backend_data.nib.Nifti1Image", _ExportedImage):
+        outputs = export_nnunet_task(
+            rows,
+            task_root=tmp_path / "nnunet",
+            dataset_id=704,
+            dataset_name="Layer1",
+            task="lesion",
+        )
+
+    assert any(path.endswith("labelsTr/pca_train.nii.gz") for path in saved)
+    assert not any(path.endswith("labelsTs/nca_test.nii.gz") for path in saved)
+    index_rows = [__import__("json").loads(line) for line in Path(outputs["dataset_index"]).read_text().splitlines()]
+    test_record = next(row for row in index_rows if row["case_id"] == "nca_test")
+    assert test_record["label"] == ""
+    assert test_record["metadata"]["labels_available"] is False

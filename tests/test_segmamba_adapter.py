@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from segmoe_v2.io_utils import save_json, save_jsonl
 from segmoe_v2.segmamba_adapter import SegMambaLayer1Dataset, layer1_high_recall_loss, layer1_target_from_source_labels, predict, train
@@ -70,7 +71,7 @@ def test_segmamba_dataset_samples_layer1_patch_with_mimic_positive(tmp_path: Pat
 
 
 def test_layer1_high_recall_loss_uses_source_weights_only_for_bce() -> None:
-    torch = __import__("torch")
+    torch = pytest.importorskip("torch")
     logits = torch.zeros((1, 1, 2, 1, 1), dtype=torch.float32)
     target = torch.ones_like(logits)
     low_weight = torch.ones_like(logits) * 0.75

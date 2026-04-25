@@ -166,6 +166,9 @@ def test_cli_manifest_and_backend_exports(tmp_path: Path) -> None:
     mednext_dataset_dir = mednext_root / "Task502_ProstateCanonical"
     assert (mednext_dataset_dir / "dataset.json").exists()
     assert (mednext_dataset_dir / "splits_final.pkl").exists()
+    mednext_dataset_json = __import__("json").loads((mednext_dataset_dir / "dataset.json").read_text(encoding="utf-8"))
+    assert mednext_dataset_json["segmoe_main_label_mode"] == "source"
+    assert mednext_dataset_json["segmoe_include_test_labels"] is False
     assert any(path.endswith("pca_000.nii.gz") for path in saved_labels)
     exported_label = next(array for path, array in saved_labels.items() if path.endswith("labelsTr/pca_000.nii.gz"))
     exported_source = next(array for path, array in saved_labels.items() if path.endswith("sourceLabelsTr/pca_000.nii.gz"))

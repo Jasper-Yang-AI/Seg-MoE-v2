@@ -41,11 +41,11 @@ class NnUNetResEncRunner(BaseRunner):
         dataset_id = experiment_cfg["dataset_id"]
         trainer = experiment_cfg.get(
             "trainer",
-            "nnUNetTrainerSegMoEAnatomy" if task_spec.name == "anatomy" else "nnUNetTrainer",
+            "nnUNetTrainerSegMoEAnatomy" if task_spec.name == "anatomy" else "nnUNetTrainerSegMoELayer1",
         )
         plans = experiment_cfg.get("plans", "nnUNetResEncUNetMPlans")
         export_validation_probabilities = bool(
-            experiment_cfg.get("export_validation_probabilities", task_spec.name == "anatomy")
+            experiment_cfg.get("export_validation_probabilities", task_spec.name in {"anatomy", "lesion"})
         )
         command = [
             sys.executable,
@@ -80,7 +80,7 @@ class NnUNetResEncRunner(BaseRunner):
         dataset_id = experiment_cfg["dataset_id"]
         trainer = experiment_cfg.get(
             "trainer",
-            "nnUNetTrainerSegMoEAnatomy" if task_spec.name == "anatomy" else "nnUNetTrainer",
+            "nnUNetTrainerSegMoEAnatomy" if task_spec.name == "anatomy" else "nnUNetTrainerSegMoELayer1",
         )
         plans = experiment_cfg.get("plans", "nnUNetResEncUNetMPlans")
         if task_spec.name == "anatomy":
@@ -139,4 +139,15 @@ class NnUNetResEncRunner(BaseRunner):
                 }
                 for case in cases
             ]
-        return [{"command": command, "task": task_spec.name, "split": split_name}]
+        return [
+            {
+                "case_id": case.case_id,
+                "fold": int(fold),
+                "split": str(split_name),
+                "channel_names": ("P_lesion",),
+                "prob_path": str(Path(output_dir) / f"{case.case_id}.npz"),
+                "source_manifest_hash": str(experiment_cfg.get("source_manifest_hash", "")),
+                "command": command,
+            }
+            for case in cases
+        ]

@@ -47,6 +47,8 @@ def test_vendored_runners_resolve_default_roots_and_commands(tmp_path: Path) -> 
     )
     assert nnunet.repo_root.name == "nnU-Net"
     assert nnunet_train["command"][:3] == [sys.executable, "-m", "nnunetv2.run.run_training"]
+    assert "nnUNetTrainerSegMoELayer1" in nnunet_train["command"]
+    assert "--npz" in nnunet_train["command"]
     nnunet_predict = nnunet.predict_fold(
         0,
         "val_0",
@@ -84,7 +86,7 @@ def test_vendored_runners_resolve_default_roots_and_commands(tmp_path: Path) -> 
         "-m",
         "nnunet_mednext.run.run_training",
         "3d_fullres",
-        "nnUNetTrainerV2_MedNeXt_S_kernel3",
+        "nnUNetTrainerV2_MedNeXt_S_kernel3_SegMoELayer1",
         "502",
     ]
     mednext_env = mednext._env({})

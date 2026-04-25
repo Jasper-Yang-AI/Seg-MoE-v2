@@ -20,6 +20,7 @@ from .manifest import (
     load_case_manifest,
     scan_case_roots,
 )
+from .prediction_manifests import build_layer1_prediction_manifest, merge_prediction_manifest_files
 
 __all__ = [
     "CalibrationRecord",
@@ -34,6 +35,7 @@ __all__ = [
     "build_case_manifest",
     "build_fp_bank",
     "build_gland_crop_records",
+    "build_layer1_prediction_manifest",
     "export_mednext_splits",
     "export_mednext_task",
     "export_nnunet_splits",
@@ -43,6 +45,7 @@ __all__ = [
     "fit_temperature_scaler",
     "load_case_manifest",
     "load_gland_crop_manifest",
+    "merge_prediction_manifest_files",
     "prepare_layer1_moe_data",
     "prepare_segmamba_data",
     "scan_case_roots",

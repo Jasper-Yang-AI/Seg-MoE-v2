@@ -56,7 +56,12 @@ class MedNeXtRunner(BaseRunner):
         cases: Sequence[CaseManifestRow],
         experiment_cfg: Mapping[str, Any],
     ) -> Mapping[str, Any]:
-        trainer = experiment_cfg.get("trainer", "nnUNetTrainerV2_MedNeXt_S_kernel3")
+        trainer = experiment_cfg.get(
+            "trainer",
+            "nnUNetTrainerV2_MedNeXt_S_kernel3_SegMoELayer1"
+            if task_spec.name == "lesion"
+            else "nnUNetTrainerV2_MedNeXt_S_kernel3",
+        )
         plans = experiment_cfg.get("plans", "nnUNetPlansv2.1_trgSp_1x1x1")
         command = self._entry_command(
             experiment_cfg,
@@ -91,7 +96,12 @@ class MedNeXtRunner(BaseRunner):
     ) -> Sequence[Mapping[str, Any]]:
         input_dir = experiment_cfg["predict_input_dir"]
         output_dir = experiment_cfg["predict_output_dir"]
-        trainer = experiment_cfg.get("trainer", "nnUNetTrainerV2_MedNeXt_S_kernel3")
+        trainer = experiment_cfg.get(
+            "trainer",
+            "nnUNetTrainerV2_MedNeXt_S_kernel3_SegMoELayer1"
+            if task_spec.name == "lesion"
+            else "nnUNetTrainerV2_MedNeXt_S_kernel3",
+        )
         plans = experiment_cfg.get("plans", "nnUNetPlansv2.1_trgSp_1x1x1")
         command = self._entry_command(
             experiment_cfg,
@@ -121,4 +131,15 @@ class MedNeXtRunner(BaseRunner):
         if experiment_cfg.get("dry_run", False):
             return [{"command": command, "cases": len(cases), "task": task_spec.name, "split": split_name}]
         subprocess.run(command, cwd=self.repo_root, env=self._env(experiment_cfg), check=True)
-        return [{"command": command, "task": task_spec.name, "split": split_name}]
+        return [
+            {
+                "case_id": case.case_id,
+                "fold": int(fold),
+                "split": str(split_name),
+                "channel_names": ("background", "P_lesion"),
+                "prob_path": str(Path(output_dir) / f"{case.case_id}.npz"),
+                "source_manifest_hash": str(experiment_cfg.get("source_manifest_hash", "")),
+                "command": command,
+            }
+            for case in cases
+        ]
