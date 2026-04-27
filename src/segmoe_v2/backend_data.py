@@ -31,7 +31,7 @@ except ModuleNotFoundError:
 
 from .contracts import CaseManifestRow
 from .gland_crop import DEFAULT_MIN_CROP_SIZE_ZYX, GlandCropRecord, index_gland_crop_manifest, load_gland_crop_manifest
-from .io_utils import load_jsonl, save_json, save_jsonl, save_pickle, stable_hash
+from .io_utils import load_jsonl, resolve_local_path, save_json, save_jsonl, save_pickle, stable_hash
 from .labels import (
     LAYER1_BACKGROUND_WEIGHT,
     LAYER1_CANDIDATE_POSITIVE_LABEL_VALUES,
@@ -82,7 +82,7 @@ def resolve_vendored_backend_root(backend: str, explicit_root: str | Path | None
 
 
 def _link_or_copy_file(source: str | Path, destination: str | Path) -> Path:
-    source = Path(source)
+    source = resolve_local_path(source)
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
@@ -131,6 +131,7 @@ def _load_anatomy_prior_bundle(record: Mapping[str, Any]) -> dict[str, np.ndarra
     prob_path = record.get("prob_path") or record.get("probabilities_path")
     if not prob_path:
         raise KeyError(f"Anatomy prediction record for {record.get('case_id')} has no prob_path.")
+    prob_path = resolve_local_path(prob_path)
     payload = np.load(str(prob_path), allow_pickle=True)
     if "probabilities" in payload:
         probabilities = np.asarray(payload["probabilities"], dtype=np.float32)
@@ -161,6 +162,7 @@ def _crop_xyz(arr: np.ndarray, bbox_zyx: tuple[int, int, int, int, int, int] | N
 
 
 def _load_nifti_zyx(path: str | Path, *, dtype: np.dtype | None = np.float32) -> np.ndarray:
+    path = resolve_local_path(path)
     arr = np.asanyarray(nib.load(str(path)).dataobj)
     arr = np.transpose(arr, (2, 1, 0))
     if dtype is not None:
@@ -199,6 +201,7 @@ def _write_cropped_source_nifti(
     *,
     bbox_zyx: tuple[int, int, int, int, int, int] | None,
 ) -> Path:
+    source = resolve_local_path(source)
     if bbox_zyx is None:
         return _link_or_copy_file(source, destination)
     image = nib.load(str(source))
@@ -213,6 +216,7 @@ def _write_prior_nifti(
     destination: str | Path,
     bbox_zyx: tuple[int, int, int, int, int, int] | None,
 ) -> Path:
+    reference_path = resolve_local_path(reference_path)
     reference = nib.load(str(reference_path))
     cropped = _crop_zyx(np.asarray(prior_zyx, dtype=np.float32), bbox_zyx)
     return _save_nifti_xyz(
@@ -257,12 +261,13 @@ def _export_label_bundle_for_task(
     layer1_main_label_mode: Layer1MainLabelMode = "source",
 ) -> dict[str, Path]:
     destination = Path(destination)
+    label_path = resolve_local_path(row.label_path)
     if task == "anatomy":
         if bbox_zyx is not None:
             raise ValueError("Anatomy export does not support gland ROI cropping.")
-        return {"label": _link_or_copy_file(row.label_path, destination)}
+        return {"label": _link_or_copy_file(label_path, destination)}
 
-    image = nib.load(str(row.label_path))
+    image = nib.load(str(label_path))
     source, target, weights = _layer1_source_target_weight_from_image(image, row.cohort_type, bbox_zyx=bbox_zyx)
     main_label = source if layer1_main_label_mode == "source" else target
     outputs = {
@@ -318,11 +323,17 @@ def _build_dataset_records(
             metadata["source_positive_weights"] = {str(k): float(v) for k, v in LAYER1_SOURCE_AWARE_WEIGHTS.items()}
         labels_available = row.fixed_split == "trainval" or include_test_labels
         metadata["labels_available"] = labels_available
-        image_channels = [str(row.t2w_path), str(row.adc_path), str(row.dwi_path)]
+        image_channels = [
+            str(resolve_local_path(row.t2w_path)),
+            str(resolve_local_path(row.adc_path)),
+            str(resolve_local_path(row.dwi_path)),
+        ]
         prior_record = prediction_index.get(row.case_id)
         anatomy_priors: dict[str, str] = {}
         if prior_record is not None:
-            anatomy_priors = {"prob_path": str(prior_record.get("prob_path") or prior_record.get("probabilities_path"))}
+            anatomy_priors = {
+                "prob_path": str(resolve_local_path(prior_record.get("prob_path") or prior_record.get("probabilities_path")))
+            }
             image_channels.extend([f"{row.case_id}:P_WG", f"{row.case_id}:P_PZ", f"{row.case_id}:P_TZ"])
         records.append(
             {
@@ -334,7 +345,7 @@ def _build_dataset_records(
                 "val_fold": row.val_fold,
                 "task": task,
                 "image": image_channels,
-                "label": str(row.label_path) if labels_available else "",
+                "label": str(resolve_local_path(row.label_path)) if labels_available else "",
                 "anatomy_priors": anatomy_priors,
                 "has_lesion_label3": row.has_lesion_label3 if labels_available else False,
                 "label_unique_values": list(row.label_unique_values) if labels_available else [],
@@ -682,7 +693,7 @@ def prepare_segmamba_data(
             data = np.stack(channels, axis=0).astype(np.float32)
             labels_available = row.fixed_split == "trainval" or include_test_labels
             if labels_available:
-                label_image = nib.load(str(row.label_path))
+                label_image = nib.load(str(resolve_local_path(row.label_path)))
                 source_xyz = _layer1_source_label_from_image(label_image, row.cohort_type)
                 source_zyx = np.transpose(source_xyz, (2, 1, 0))
                 seg_source = _crop_zyx(source_zyx, bbox).astype(np.uint8)

@@ -9,7 +9,7 @@ import numpy as np
 from scipy.ndimage import label as connected_components
 
 from .contracts import CaseManifestRow
-from .io_utils import load_jsonl, save_jsonl, stable_hash
+from .io_utils import load_jsonl, resolve_local_path, save_jsonl, stable_hash
 from .roi import expand_bbox_to_min_size
 
 
@@ -71,6 +71,7 @@ def _normalise_channel_names(raw: Any) -> list[str]:
 
 
 def _load_probabilities(path: str | Path) -> tuple[np.ndarray, list[str]]:
+    path = resolve_local_path(path)
     payload = np.load(str(path), allow_pickle=True)
     if "probabilities" in payload:
         probabilities = np.asarray(payload["probabilities"], dtype=np.float32)
@@ -145,8 +146,11 @@ def build_gland_crop_records(
         prediction = prediction_by_case.get(row.case_id)
         if prediction is None:
             raise KeyError(f"No anatomy prediction record found for case_id={row.case_id}")
-        prob_path = str(prediction.get("prob_path") or prediction.get("probabilities_path"))
-        wg_probability = _extract_wg_probability(prob_path, prediction)
+        prob_path = str(resolve_local_path(prediction.get("prob_path") or prediction.get("probabilities_path")))
+        try:
+            wg_probability = _extract_wg_probability(prob_path, prediction)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to load anatomy probability for case_id={row.case_id}: {prob_path}") from exc
         if wg_probability.ndim != 3:
             raise ValueError(f"Expected P_WG shape [Z,Y,X], got {wg_probability.shape}")
 

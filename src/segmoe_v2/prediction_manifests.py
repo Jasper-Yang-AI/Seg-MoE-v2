@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+import zipfile
 
 import numpy as np
 
 from .contracts import PredictionRecord
-from .io_utils import load_jsonl, save_jsonl, stable_hash
+from .io_utils import load_jsonl, resolve_local_path, save_jsonl, stable_hash
 
 
 def merge_prediction_manifest_files(inputs: Sequence[str | Path], output: str | Path) -> Path:
@@ -14,6 +15,10 @@ def merge_prediction_manifest_files(inputs: Sequence[str | Path], output: str | 
     seen: set[tuple[str, str, str, str]] = set()
     for input_path in inputs:
         for record in load_jsonl(input_path):
+            record = dict(record)
+            for key_name in ("prob_path", "probabilities_path", "logit_path"):
+                if record.get(key_name):
+                    record[key_name] = str(resolve_local_path(record[key_name]))
             key = (
                 str(record.get("case_id", "")),
                 str(record.get("model_name", "")),
@@ -23,8 +28,50 @@ def merge_prediction_manifest_files(inputs: Sequence[str | Path], output: str | 
             if key in seen:
                 continue
             seen.add(key)
-            records.append(dict(record))
+            records.append(record)
     return save_jsonl(records, output)
+
+
+def audit_prediction_manifest(
+    manifest: str | Path,
+    *,
+    bad_out: str | Path | None = None,
+) -> dict[str, Any]:
+    rows = load_jsonl(manifest)
+    bad_rows: list[dict[str, Any]] = []
+    missing_rows: list[dict[str, Any]] = []
+    ok = 0
+    for row in rows:
+        record = dict(row)
+        raw_path = record.get("prob_path") or record.get("probabilities_path") or record.get("logit_path")
+        if not raw_path:
+            bad_rows.append({**record, "audit_error": "missing_prediction_path"})
+            continue
+        resolved = resolve_local_path(raw_path)
+        record["resolved_path"] = str(resolved)
+        if not resolved.exists():
+            missing_rows.append({**record, "audit_error": "file_not_found"})
+            continue
+        try:
+            with zipfile.ZipFile(resolved) as handle:
+                bad_member = handle.testzip()
+            if bad_member is not None:
+                bad_rows.append({**record, "audit_error": f"bad_zip_member:{bad_member}"})
+                continue
+        except Exception as exc:
+            bad_rows.append({**record, "audit_error": f"{type(exc).__name__}: {exc}"})
+            continue
+        ok += 1
+    if bad_out is not None:
+        save_jsonl([*missing_rows, *bad_rows], bad_out)
+    return {
+        "manifest": str(manifest),
+        "total": len(rows),
+        "ok": ok,
+        "missing": len(missing_rows),
+        "bad": len(bad_rows),
+        "bad_out": str(bad_out) if bad_out is not None else "",
+    }
 
 
 def _matches_split(record: Mapping[str, Any], *, fold: int, split: str) -> bool:

@@ -4,7 +4,7 @@ import csv
 import hashlib
 import json
 import pickle
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Iterable
 
 
@@ -12,6 +12,50 @@ def ensure_parent(path: str | Path) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def project_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def resolve_local_path(path: str | Path, *, root: str | Path | None = None) -> Path:
+    """Resolve paths embedded in manifests after moving between Windows and WSL."""
+
+    candidate = Path(path)
+    if candidate.exists():
+        return candidate
+
+    base = Path(root) if root is not None else project_root()
+    raw = str(path)
+    normalised = raw.replace("\\", "/")
+    marker = "Seg-MoE-v2/"
+    if marker in normalised:
+        relocated = base / normalised.split(marker, 1)[1]
+        if relocated.exists():
+            return relocated
+        return relocated
+
+    windows_parts = PureWindowsPath(raw).parts
+    if "Seg-MoE-v2" in windows_parts:
+        idx = windows_parts.index("Seg-MoE-v2")
+        relocated = base.joinpath(*windows_parts[idx + 1 :])
+        if relocated.exists():
+            return relocated
+        return relocated
+    windows_path = PureWindowsPath(raw)
+    if windows_path.drive:
+        drive = windows_path.drive.rstrip(":").lower()
+        relocated = Path("/mnt") / drive
+        relocated = relocated.joinpath(*windows_path.parts[1:])
+        if relocated.exists():
+            return relocated
+        return relocated
+    if normalised != raw:
+        relocated = base / normalised
+        if relocated.exists():
+            return relocated
+        return relocated
+    return candidate
 
 
 def load_json(path: str | Path) -> Any:

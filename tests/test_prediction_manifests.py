@@ -5,7 +5,11 @@ from pathlib import Path
 import numpy as np
 
 from segmoe_v2.io_utils import load_jsonl, save_jsonl
-from segmoe_v2.prediction_manifests import build_layer1_prediction_manifest, merge_prediction_manifest_files
+from segmoe_v2.prediction_manifests import (
+    audit_prediction_manifest,
+    build_layer1_prediction_manifest,
+    merge_prediction_manifest_files,
+)
 
 
 def test_build_layer1_prediction_manifest_infers_mednext_softmax(tmp_path: Path) -> None:
@@ -53,3 +57,18 @@ def test_merge_prediction_manifest_files_deduplicates_exact_records(tmp_path: Pa
 
     rows = load_jsonl(output)
     assert [row["case_id"] for row in rows] == ["case_a", "case_b"]
+
+
+def test_audit_prediction_manifest_checks_npz_integrity(tmp_path: Path) -> None:
+    prediction = tmp_path / "predictions" / "case_a.npz"
+    prediction.parent.mkdir()
+    np.savez_compressed(prediction, probabilities=np.ones((1, 2, 2, 2), dtype=np.float32))
+    manifest = tmp_path / "manifest.jsonl"
+    save_jsonl([{"case_id": "case_a", "prob_path": str(prediction)}], manifest)
+
+    summary = audit_prediction_manifest(manifest, bad_out=tmp_path / "bad.jsonl")
+
+    assert summary["ok"] == 1
+    assert summary["bad"] == 0
+    assert summary["missing"] == 0
+    assert load_jsonl(tmp_path / "bad.jsonl") == []

@@ -20,7 +20,7 @@ from .manifest import (
     load_case_manifest,
     scan_case_roots,
 )
-from .prediction_manifests import build_layer1_prediction_manifest, merge_prediction_manifest_files
+from .prediction_manifests import audit_prediction_manifest, build_layer1_prediction_manifest, merge_prediction_manifest_files
 
 __all__ = [
     "CalibrationRecord",
@@ -32,6 +32,7 @@ __all__ = [
     "TemperatureScaler",
     "audit_manifest",
     "audit_manifest_artifacts",
+    "audit_prediction_manifest",
     "build_case_manifest",
     "build_fp_bank",
     "build_gland_crop_records",

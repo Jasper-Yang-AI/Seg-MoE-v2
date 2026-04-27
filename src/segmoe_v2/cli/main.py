@@ -42,7 +42,7 @@ from ..manifest import (
     write_manifest_artifacts,
 )
 from ..io_utils import load_jsonl
-from ..prediction_manifests import build_layer1_prediction_manifest, merge_prediction_manifest_files
+from ..prediction_manifests import audit_prediction_manifest, build_layer1_prediction_manifest, merge_prediction_manifest_files
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -163,6 +163,10 @@ def build_parser() -> argparse.ArgumentParser:
     merge_predictions.add_argument("--inputs", nargs="+", required=True)
     merge_predictions.add_argument("--output", required=True)
 
+    audit_predictions = sub.add_parser("audit-prediction-manifest", help="Check prediction manifest paths and npz integrity")
+    audit_predictions.add_argument("--manifest", required=True)
+    audit_predictions.add_argument("--bad-out", required=False)
+
     layer1_predictions = sub.add_parser(
         "build-layer1-prediction-manifest",
         help="Create a Layer1 prediction manifest from nnU-Net or MedNeXt .npz outputs",
@@ -226,6 +230,18 @@ def main(argv: Sequence[str] | None = None) -> None:
     if args.command == "merge-prediction-manifests":
         output = merge_prediction_manifest_files(args.inputs, args.output)
         print(f"Prediction manifest written to {output}")
+        return
+
+    if args.command == "audit-prediction-manifest":
+        summary = audit_prediction_manifest(args.manifest, bad_out=args.bad_out)
+        print(
+            "Prediction manifest audit: "
+            f"total={summary['total']} ok={summary['ok']} missing={summary['missing']} bad={summary['bad']}"
+        )
+        if summary["bad_out"]:
+            print(f"  bad_out: {summary['bad_out']}")
+        if summary["missing"] or summary["bad"]:
+            raise SystemExit(1)
         return
 
     if args.command == "build-layer1-prediction-manifest":
@@ -377,8 +393,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         return
 
     if args.command == "visualize-anatomy-qc":
-        from ..io_utils import load_jsonl
-
         summary = generate_anatomy_visual_qc(
             rows,
             prediction_manifest=load_jsonl(args.prediction_manifest),
