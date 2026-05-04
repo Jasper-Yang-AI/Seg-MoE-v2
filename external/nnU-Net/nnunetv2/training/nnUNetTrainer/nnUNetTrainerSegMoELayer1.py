@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import List, Tuple, Union
 
@@ -33,6 +34,7 @@ class nnUNetTrainerSegMoELayer1(nnUNetTrainer):
 
     source_positive_weights = {1: 1.25, 2: 0.75}
     head_channel_names: Tuple[str, ...] = LAYER1_PROBABILITY_CHANNELS
+    filtered_validation_min_dice = 0.30
 
     @staticmethod
     def build_network_architecture(
@@ -264,9 +266,32 @@ class nnUNetTrainerSegMoELayer1(nnUNetTrainer):
                 )
 
         mean_dice = float(np.nanmean([item["metrics"]["candidate"]["Dice"] for item in metric_per_case]))
+        min_dice = float(os.environ.get("SEGMOE_LAYER1_FILTER_MIN_DICE", self.filtered_validation_min_dice))
+        filtered_metric_per_case = [
+            item
+            for item in metric_per_case
+            if np.isfinite(float(item["metrics"]["candidate"]["Dice"]))
+            and float(item["metrics"]["candidate"]["Dice"]) >= min_dice
+        ]
+        filtered_mean_dice = (
+            float(np.nanmean([item["metrics"]["candidate"]["Dice"] for item in filtered_metric_per_case]))
+            if filtered_metric_per_case
+            else float("nan")
+        )
+        filtered_excluded_case_ids = [
+            str(item["reference_file"]) for item in metric_per_case if item not in filtered_metric_per_case
+        ]
         summary = {
             "metric_per_case": metric_per_case,
+            "mean": {"candidate": {"Dice": mean_dice}},
             "foreground_mean": {"Dice": mean_dice},
+            "filtered": {
+                "min_dice": min_dice,
+                "case_count": len(filtered_metric_per_case),
+                "excluded_case_count": len(filtered_excluded_case_ids),
+                "excluded_case_ids": filtered_excluded_case_ids,
+                "mean": {"candidate": {"Dice": filtered_mean_dice}},
+            },
             "channel_names": list(self.head_channel_names),
             "source_aware_training": True,
         }
@@ -277,4 +302,10 @@ class nnUNetTrainerSegMoELayer1(nnUNetTrainer):
                     handle.write(json.dumps(record, ensure_ascii=False) + "\n")
         self.print_to_log_file("Validation complete", also_print_to_console=True)
         self.print_to_log_file("Mean Layer1 Candidate Dice: ", np.round(mean_dice, decimals=4), also_print_to_console=True)
+        self.print_to_log_file(
+            "Filtered Layer1 Candidate Dice: ",
+            np.round(filtered_mean_dice, decimals=4),
+            f"kept {len(filtered_metric_per_case)}/{len(metric_per_case)} cases",
+            also_print_to_console=True,
+        )
         self.set_deep_supervision_enabled(True)

@@ -177,3 +177,27 @@ class ExperimentPlanner3D_v21(ExperimentPlanner):
             'conv_kernel_sizes': conv_kernel_sizes,
         }
         return plan
+
+
+class ExperimentPlanner3D_v21_MedNeXt32(ExperimentPlanner3D_v21):
+    def __init__(self, folder_with_cropped_data, preprocessed_output_folder):
+        super().__init__(folder_with_cropped_data, preprocessed_output_folder)
+        self.data_identifier = "nnUNetData_plans_v2.1_mednext32"
+        self.plans_fname = join(self.preprocessed_output_folder, "nnUNetPlansv2.1_mednext32_plans_3D.pkl")
+
+    def get_properties_for_stage(self, current_spacing, original_spacing, original_shape, num_cases,
+                                 num_modalities, num_classes):
+        plan = super().get_properties_for_stage(
+            current_spacing,
+            original_spacing,
+            original_shape,
+            num_cases,
+            num_modalities,
+            num_classes,
+        )
+        patch_size = np.asarray(plan["patch_size"], dtype=int)
+        plan["patch_size"] = (
+            (patch_size + 31) // 32 * 32
+        ).astype(np.int64)
+        plan["batch_size"] = 1
+        return plan

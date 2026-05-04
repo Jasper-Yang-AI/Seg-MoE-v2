@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 
@@ -111,6 +112,7 @@ class Layer1SourceAwareCELoss(nn.Module):
 
 class _Layer1SourceAwareMedNeXtMixin:
     source_positive_weights = {1: 1.25, 2: 0.75}
+    filtered_validation_min_dice = 0.30
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -165,11 +167,54 @@ class _Layer1SourceAwareMedNeXtMixin:
                 self._write_binary_reference(source_path, destination_path)
         return str(destination_folder)
 
+    @staticmethod
+    def _case_id_from_summary_path(value):
+        name = Path(str(value)).name
+        return name[:-7] if name.endswith(".nii.gz") else Path(name).stem
+
+    def _add_filtered_validation_summary(self, summary_path):
+        summary_path = Path(summary_path)
+        if not summary_path.exists():
+            return
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        rows = list(summary.get("results", {}).get("all", []))
+        min_dice = float(os.environ.get("SEGMOE_LAYER1_FILTER_MIN_DICE", self.filtered_validation_min_dice))
+        filtered_rows = [
+            row
+            for row in rows
+            if np.isfinite(float(row.get("1", {}).get("Dice", float("nan"))))
+            and float(row.get("1", {}).get("Dice", float("nan"))) >= min_dice
+        ]
+        filtered_mean_dice = (
+            float(np.nanmean([row["1"]["Dice"] for row in filtered_rows])) if filtered_rows else float("nan")
+        )
+        filtered_excluded_case_ids = [
+            self._case_id_from_summary_path(row.get("reference") or row.get("test") or "")
+            for row in rows
+            if row not in filtered_rows
+        ]
+        summary["filtered"] = {
+            "min_dice": min_dice,
+            "case_count": len(filtered_rows),
+            "excluded_case_count": len(filtered_excluded_case_ids),
+            "excluded_case_ids": filtered_excluded_case_ids,
+            "mean": {"candidate": {"Dice": filtered_mean_dice}},
+        }
+        summary_path.write_text(json.dumps(summary, indent=4, sort_keys=True), encoding="utf-8")
+        self.print_to_log_file(
+            "Filtered Layer1 Candidate Dice:",
+            np.round(filtered_mean_dice, decimals=4),
+            f"kept {len(filtered_rows)}/{len(rows)} cases",
+        )
+
     def validate(self, *args, **kwargs):
         original_gt_folder = self.gt_niftis_folder
         self.gt_niftis_folder = self._binary_gt_niftis_folder()
         try:
-            return super().validate(*args, **kwargs)
+            result = super().validate(*args, **kwargs)
+            validation_folder_name = args[6] if len(args) > 6 else kwargs.get("validation_folder_name", "validation_raw")
+            self._add_filtered_validation_summary(Path(self.output_folder) / validation_folder_name / "summary.json")
+            return result
         finally:
             self.gt_niftis_folder = original_gt_folder
 

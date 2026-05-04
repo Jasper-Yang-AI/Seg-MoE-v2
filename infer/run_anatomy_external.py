@@ -26,10 +26,11 @@ os.environ.setdefault("nnUNet_raw", str(REPO_ROOT / "nnUNet_raw"))
 os.environ.setdefault("nnUNet_preprocessed", str(REPO_ROOT / "nnUNet_preprocessed"))
 os.environ.setdefault("nnUNet_results", str(REPO_ROOT / "nnUNet_results"))
 
-EXTERNAL_ROOT = Path("/mnt/z/multicenter_pca/PCa_SuZhou_Multicenter")
+EXTERNAL_ROOT = Path("/mnt/z/multicenter_pca/PCa_SuZhou_Multicenter/jiulong")
 FOLDS = (0, 1, 2, 3, 4)
 CHECKPOINT_NAME = "checkpoint_best.pth"
 CASE_LIMIT: int | None = None
+EXCLUDE_CASE_IDS = set()
 
 DATASET_ID = "501"
 TRAINER = "nnUNetTrainerSegMoEAnatomy"
@@ -47,15 +48,15 @@ PERFORM_EVERYTHING_ON_DEVICE = True
 NUM_PREPROCESS_WORKERS = 2
 
 MODALITY_PATTERNS = {
-    "t2w": (r"(^|[/_\-.])t2w?([/_\-.]|$)", r"t2[_\- ]?tra", r"t2[_\- ]?ax"),
-    "adc": (r"(^|[/_\-.])adc([/_\-.]|$)",),
-    "dwi": (r"(^|[/_\-.])dwi([/_\-.]|$)", r"(^|[/_\-.])hbv([/_\-.]|$)", r"b[0-9]{3,4}"),
+    "t2w": (r"(^|[/_\-.])t2wi([/_\-.]|$)",),
+    "adc": (r"(^|[/_\-.])adc[_\- ]?reg([/_\-.]|$)",),
+    "dwi": (r"(^|[/_\-.])dwi[_\- ]?reg([/_\-.]|$)",),
 }
-LABEL_PATTERNS = (
-    r"(^|/)(label|labels|seg|segs|mask|masks|annotation|annotations)(/|$)",
-    r"(^|[/_\-.])(label|seg|mask|annotation)([/_\-.]|$)",
-)
-LABEL_EXCLUDE_PATTERNS = (OUTPUT_MASK_NAME.lower(),)
+REFERENCE_MASKS = {
+    "WG": Path("pca_24b") / "Prostate.nii.gz",
+    "PZ": Path("pca_24b") / "Pz.nii.gz",
+    "TZ": Path("pca_24b") / "Tz.nii.gz",
+}
 MODALITY_EXCLUDE_PATTERNS = (
     r"(^|/)(label|labels|seg|segs|mask|masks|annotation|annotations)(/|$)",
     OUTPUT_MASK_NAME.lower(),
@@ -75,7 +76,9 @@ class ExternalCase:
     t2w_path: Path
     adc_path: Path
     dwi_path: Path
-    label_path: Path
+    wg_label_path: Path
+    pz_label_path: Path
+    tz_label_path: Path
     output_mask_path: Path
 
 
@@ -104,8 +107,35 @@ def _candidate_files(
     return candidates
 
 
+def _has_direct_nifti_files(root: Path) -> bool:
+    return any(root.glob("*.nii")) or any(root.glob("*.nii.gz"))
+
+
+def _discover_case_dirs(root: Path) -> list[Path]:
+    # Support both layouts: <root>/<case_id> and <root>/<center>/<case_id>
+    if _has_direct_nifti_files(root):
+        return [root]
+
+    level_one_dirs = sorted(path for path in root.iterdir() if path.is_dir())
+    if any(_has_direct_nifti_files(path) for path in level_one_dirs):
+        return level_one_dirs
+
+    case_dirs: list[Path] = []
+    for center_dir in level_one_dirs:
+        case_dirs.extend(sorted(path for path in center_dir.iterdir() if path.is_dir()))
+    return case_dirs
+
+
+def _resolve_case_id(case_dir: Path, root: Path) -> str:
+    relative = case_dir.relative_to(root).as_posix()
+    if relative == ".":
+        return case_dir.name
+    return relative.replace("/", "_")
+
+
 def _find_unique(
     case_dir: Path,
+    case_id: str,
     key: str,
     patterns: Sequence[str],
     errors: list[dict[str, str]],
@@ -117,7 +147,7 @@ def _find_unique(
         return candidates[0]
     errors.append(
         {
-            "case_id": case_dir.name,
+            "case_id": case_id,
             "case_dir": str(case_dir),
             "field": key,
             "error": "missing" if len(candidates) == 0 else "ambiguous",
@@ -125,6 +155,25 @@ def _find_unique(
         }
     )
     return None
+
+
+def _find_reference_masks(case_dir: Path, case_id: str, errors: list[dict[str, str]]) -> dict[str, Path] | None:
+    references: dict[str, Path] = {}
+    for region, relative_path in REFERENCE_MASKS.items():
+        path = case_dir / relative_path
+        if path.exists():
+            references[region] = path
+            continue
+        errors.append(
+            {
+                "case_id": case_id,
+                "case_dir": str(case_dir),
+                "field": f"{region}_label",
+                "error": "missing",
+                "candidates": str(path),
+            }
+        )
+    return references if len(references) == len(REFERENCE_MASKS) else None
 
 
 def discover_cases(root: Path) -> tuple[list[ExternalCase], list[dict[str, str]]]:
@@ -141,23 +190,49 @@ def discover_cases(root: Path) -> tuple[list[ExternalCase], list[dict[str, str]]
         )
         return [], errors
 
-    case_dirs = sorted(path for path in root.iterdir() if path.is_dir())
+    case_dirs = _discover_case_dirs(root)
     cases: list[ExternalCase] = []
     for case_dir in case_dirs:
-        t2w = _find_unique(case_dir, "t2w", MODALITY_PATTERNS["t2w"], errors, exclude_patterns=MODALITY_EXCLUDE_PATTERNS)
-        adc = _find_unique(case_dir, "adc", MODALITY_PATTERNS["adc"], errors, exclude_patterns=MODALITY_EXCLUDE_PATTERNS)
-        dwi = _find_unique(case_dir, "dwi", MODALITY_PATTERNS["dwi"], errors, exclude_patterns=MODALITY_EXCLUDE_PATTERNS)
-        label = _find_unique(case_dir, "label", LABEL_PATTERNS, errors, exclude_patterns=LABEL_EXCLUDE_PATTERNS)
-        if t2w is None or adc is None or dwi is None or label is None:
+        case_id = _resolve_case_id(case_dir, root)
+        if case_id in EXCLUDE_CASE_IDS:
+            continue
+        t2w = _find_unique(
+            case_dir,
+            case_id,
+            "t2w",
+            MODALITY_PATTERNS["t2w"],
+            errors,
+            exclude_patterns=MODALITY_EXCLUDE_PATTERNS,
+        )
+        adc = _find_unique(
+            case_dir,
+            case_id,
+            "adc",
+            MODALITY_PATTERNS["adc"],
+            errors,
+            exclude_patterns=MODALITY_EXCLUDE_PATTERNS,
+        )
+        dwi = _find_unique(
+            case_dir,
+            case_id,
+            "dwi",
+            MODALITY_PATTERNS["dwi"],
+            errors,
+            exclude_patterns=MODALITY_EXCLUDE_PATTERNS,
+        )
+        references = _find_reference_masks(case_dir, case_id, errors)
+        if t2w is None or adc is None or dwi is None or references is None:
             continue
         cases.append(
             ExternalCase(
-                case_id=case_dir.name,
+                case_id=case_id,
                 case_dir=case_dir,
                 t2w_path=t2w,
                 adc_path=adc,
                 dwi_path=dwi,
-                label_path=label,
+                wg_label_path=references["WG"],
+                pz_label_path=references["PZ"],
+                tz_label_path=references["TZ"],
                 output_mask_path=case_dir / OUTPUT_MASK_NAME,
             )
         )
@@ -247,21 +322,27 @@ def _region_metrics(prediction: np.ndarray, reference: np.ndarray, spacing: Sequ
 
 
 def compute_case_metrics(case: ExternalCase, prediction_mask: np.ndarray) -> dict[str, float | str]:
-    label_image = nib.load(str(case.label_path))
-    reference = np.asanyarray(label_image.dataobj).astype(np.int16)
-    if reference.shape != prediction_mask.shape:
-        raise ValueError(
-            f"{case.case_id}: label shape {reference.shape} does not match prediction shape {prediction_mask.shape}"
-        )
-    spacing = tuple(float(v) for v in label_image.header.get_zooms()[:3])
+    reference_paths = {
+        "WG": case.wg_label_path,
+        "PZ": case.pz_label_path,
+        "TZ": case.tz_label_path,
+    }
     row: dict[str, float | str] = {
         "case_id": case.case_id,
         "case_dir": str(case.case_dir),
         "prediction_mask": str(case.output_mask_path),
     }
     for region, values in REGIONS.items():
+        label_image = nib.load(str(reference_paths[region]))
+        reference = np.asanyarray(label_image.dataobj).astype(np.int16)
+        if reference.shape != prediction_mask.shape:
+            raise ValueError(
+                f"{case.case_id}: {region} label shape {reference.shape} does not match prediction shape "
+                f"{prediction_mask.shape}"
+            )
+        spacing = tuple(float(v) for v in label_image.header.get_zooms()[:3])
         pred_region = np.isin(prediction_mask, values)
-        ref_region = np.isin(reference, values)
+        ref_region = reference != 0
         metrics = _region_metrics(pred_region, ref_region, spacing)
         for key, value in metrics.items():
             row[f"{region}_{key}"] = value
@@ -288,6 +369,7 @@ def summarize_metrics(rows: Sequence[dict[str, float | str]]) -> dict[str, objec
         "external_root": str(EXTERNAL_ROOT),
         "checkpoint_name": CHECKPOINT_NAME,
         "folds": list(FOLDS),
+        "reference_masks": {region: str(path) for region, path in REFERENCE_MASKS.items()},
         "case_count": len(rows),
         "regions": {},
     }
@@ -339,17 +421,23 @@ def build_predictor(model_folder: Path):
 
 
 def run_inference(cases: Sequence[ExternalCase], model_folder: Path) -> list[dict[str, float | str]]:
+    from nnunetv2.inference.data_iterators import preprocessing_iterator_fromfiles
     from segmoe_v2.nnunet_anatomy import convert_anatomy_logits_to_probabilities_with_correct_shape
 
     predictor = build_predictor(model_folder)
     input_lists = [[str(case.t2w_path), str(case.adc_path), str(case.dwi_path)] for case in cases]
     output_truncated = [str(case.case_dir / case.case_id) for case in cases]
     case_by_ofile = {output: case for output, case in zip(output_truncated, cases, strict=True)}
-    data_iterator = predictor._internal_get_data_iterator_from_lists_of_filenames(
+    data_iterator = preprocessing_iterator_fromfiles(
         input_lists,
-        [None] * len(input_lists),
+        None,
         output_truncated,
+        predictor.plans_manager,
+        predictor.dataset_json,
+        predictor.configuration_manager,
         num_processes=NUM_PREPROCESS_WORKERS,
+        pin_memory=False,
+        verbose=predictor.verbose_preprocessing,
     )
 
     metric_rows: list[dict[str, float | str]] = []
@@ -385,11 +473,31 @@ def write_case_manifest(root: Path, cases: Sequence[ExternalCase]) -> Path:
     return path
 
 
+def print_skipped_case_summary(errors: Sequence[dict[str, str]], error_path: Path) -> None:
+    by_case: dict[str, list[str]] = {}
+    for error in errors:
+        case_id = error["case_id"]
+        if not case_id:
+            continue
+        by_case.setdefault(case_id, []).append(f"{error['field']}={error['error']}")
+
+    if not by_case:
+        return
+
+    print(f"Skipped {len(by_case)} incomplete/ambiguous cases. Details written to {error_path}")
+    for case_id in sorted(by_case):
+        print(f"  - {case_id}: {', '.join(by_case[case_id])}")
+
+
 def main() -> None:
     cases, errors = discover_cases(EXTERNAL_ROOT)
-    if errors:
+    fatal_errors = [error for error in errors if error["field"] == "EXTERNAL_ROOT"]
+    if fatal_errors:
         error_path = write_preflight_errors(EXTERNAL_ROOT, errors)
         raise SystemExit(f"Preflight failed for {len(errors)} fields. See {error_path}")
+    if errors:
+        error_path = write_preflight_errors(EXTERNAL_ROOT, errors)
+        print_skipped_case_summary(errors, error_path)
     if not cases:
         raise SystemExit(f"No valid case folders found under {EXTERNAL_ROOT}")
 

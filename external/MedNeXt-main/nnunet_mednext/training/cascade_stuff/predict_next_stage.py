@@ -112,7 +112,7 @@ if __name__ == "__main__":
 
     trainer_class = recursive_find_python_class([join(nnunet_mednext.__path__[0], "training", "network_training")],
                                                 trainerclass,
-                                                "nnunet.training.network_training")
+                                                "nnunet_mednext.training.network_training")
 
     if trainer_class is None:
         raise RuntimeError("Could not find trainer class in nnunet.training.network_training")

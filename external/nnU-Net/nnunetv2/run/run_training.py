@@ -107,6 +107,10 @@ def cleanup_ddp():
     dist.destroy_process_group()
 
 
+def skip_final_validation() -> bool:
+    return os.environ.get("SEGMOE_SKIP_FINAL_VALIDATION", "").lower() in {"1", "true", "yes"}
+
+
 def run_ddp(rank, dataset_name_or_id, configuration, fold, tr, p, disable_checkpointing, c, val,
             pretrained_weights, npz, val_with_best, world_size):
     setup_ddp(rank, world_size)
@@ -130,7 +134,8 @@ def run_ddp(rank, dataset_name_or_id, configuration, fold, tr, p, disable_checkp
 
     if val_with_best:
         nnunet_trainer.load_checkpoint(join(nnunet_trainer.output_folder, 'checkpoint_best.pth'))
-    nnunet_trainer.perform_actual_validation(npz)
+    if val or not skip_final_validation():
+        nnunet_trainer.perform_actual_validation(npz)
     cleanup_ddp()
 
 
@@ -208,7 +213,8 @@ def run_training(dataset_name_or_id: Union[str, int],
 
         if val_with_best:
             nnunet_trainer.load_checkpoint(join(nnunet_trainer.output_folder, 'checkpoint_best.pth'))
-        nnunet_trainer.perform_actual_validation(export_validation_probabilities)
+        if only_run_validation or not skip_final_validation():
+            nnunet_trainer.perform_actual_validation(export_validation_probabilities)
 
 
 def run_training_entry():

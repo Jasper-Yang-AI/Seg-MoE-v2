@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -323,6 +324,7 @@ def predict(
     loader = DataLoader(dataset, batch_size=1, shuffle=False, collate_fn=_collate)
     output_dir.mkdir(parents=True, exist_ok=True)
     prediction_records: list[PredictionRecord] = []
+    metric_per_case: list[dict[str, Any]] = []
     with torch.no_grad():
         for batch in loader:
             data = batch["data"].to(device)
@@ -330,8 +332,32 @@ def predict(
             if logits.ndim == 4:
                 logits = logits[:, None]
             logits_np = logits.detach().cpu().numpy()[0].astype(np.float32)
+            target_np = batch["target"].numpy()[0]
             record = batch["record"][0]
             case_id = str(record["case_id"])
+            target_positive = target_np[0] > 0.5 if target_np.ndim == 4 and target_np.shape[0] == 1 else target_np > 0.5
+            prediction_positive = logits_np[0] >= 0.0 if logits_np.ndim == 4 and logits_np.shape[0] == 1 else logits_np >= 0.0
+            tp = float(np.logical_and(prediction_positive, target_positive).sum())
+            fp = float(np.logical_and(prediction_positive, ~target_positive).sum())
+            fn = float(np.logical_and(~prediction_positive, target_positive).sum())
+            tn = float(np.logical_and(~prediction_positive, ~target_positive).sum())
+            denominator = 2.0 * tp + fp + fn
+            dice = float(2.0 * tp / denominator) if denominator > 0 else float("nan")
+            metric_per_case.append(
+                {
+                    "reference_file": case_id,
+                    "prediction_file": str(output_dir / f"{case_id}.npz"),
+                    "metrics": {
+                        "candidate": {
+                            "Dice": dice,
+                            "FP": fp,
+                            "TP": tp,
+                            "FN": fn,
+                            "TN": tn,
+                        }
+                    },
+                }
+            )
             logit_path = output_dir / f"{case_id}.npz"
             bbox = batch["bbox_zyx"][0]
             native_shape = batch["native_shape_zyx"][0]
@@ -365,6 +391,40 @@ def predict(
     manifest_path = output_dir / "prediction_manifest.jsonl"
     save_jsonl((record.to_dict() for record in prediction_records), manifest_path)
     summary["prediction_manifest"] = str(manifest_path)
+    if metric_per_case:
+        min_dice = float(config.get("filtered_validation_min_dice", os.environ.get("SEGMOE_LAYER1_FILTER_MIN_DICE", 0.30)))
+        mean_dice = float(np.nanmean([item["metrics"]["candidate"]["Dice"] for item in metric_per_case]))
+        filtered_metric_per_case = [
+            item
+            for item in metric_per_case
+            if np.isfinite(float(item["metrics"]["candidate"]["Dice"]))
+            and float(item["metrics"]["candidate"]["Dice"]) >= min_dice
+        ]
+        filtered_mean_dice = (
+            float(np.nanmean([item["metrics"]["candidate"]["Dice"] for item in filtered_metric_per_case]))
+            if filtered_metric_per_case
+            else float("nan")
+        )
+        filtered_excluded_case_ids = [
+            str(item["reference_file"]) for item in metric_per_case if item not in filtered_metric_per_case
+        ]
+        summary.update(
+            {
+                "metric_per_case": metric_per_case,
+                "mean": {"candidate": {"Dice": mean_dice}},
+                "foreground_mean": {"Dice": mean_dice},
+                "filtered": {
+                    "min_dice": min_dice,
+                    "case_count": len(filtered_metric_per_case),
+                    "excluded_case_count": len(filtered_excluded_case_ids),
+                    "excluded_case_ids": filtered_excluded_case_ids,
+                    "mean": {"candidate": {"Dice": filtered_mean_dice}},
+                },
+            }
+        )
+        summary_path = output_dir / "summary.json"
+        summary["summary_json"] = str(summary_path)
+        summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     return summary
 
 

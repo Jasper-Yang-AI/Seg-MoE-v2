@@ -14,6 +14,7 @@
 
 
 import argparse
+import os
 from batchgenerators.utilities.file_and_folder_operations import *
 from nnunet_mednext.run.default_configuration import get_default_configuration
 from nnunet_mednext.paths import default_plans_identifier
@@ -202,9 +203,11 @@ def main():
         trainer.network.eval()
 
         # predict validation
-        trainer.validate(save_softmax=args.npz, validation_folder_name=val_folder,
-                         run_postprocessing_on_folds=not disable_postprocessing_on_folds,
-                         overwrite=args.val_disable_overwrite)
+        skip_final_validation = os.environ.get("SEGMOE_SKIP_FINAL_VALIDATION", "").lower() in {"1", "true", "yes"}
+        if validation_only or not skip_final_validation:
+            trainer.validate(save_softmax=args.npz, validation_folder_name=val_folder,
+                             run_postprocessing_on_folds=not disable_postprocessing_on_folds,
+                             overwrite=args.val_disable_overwrite)
 
         if network == '3d_lowres' and not args.disable_next_stage_pred:
             print("predicting segmentations for the next stage of the cascade")
