@@ -1,0 +1,3 @@
+model,status,log_path,last_error
+MedNeXt_layer1_fold0,failed_shape_mismatch,logs/layer1/mednext_fold0.log,RuntimeError tensor size mismatch in MedNeXt decoder skip/add path
+MedNeXt32_layer1_fold0,failed_cuda_oom,logs/layer1/mednext32_fold0.log,CUDA out of memory during training/augmentation

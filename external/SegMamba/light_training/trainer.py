@@ -159,7 +159,7 @@ class Trainer:
         data_generator = LimitedLenWrapper(self.num_step_per_epoch, data_loader=train_loader, 
                                            transform=tr_transforms,
                                              num_processes=self.train_process, num_cached=6, seeds=None,
-                                             pin_memory=True, wait_time=0.02)
+                                             pin_memory=getattr(self, "pin_memory", True), wait_time=0.02)
         if val_ds is None:
             val_data_generator = None 
         else :
@@ -170,7 +170,7 @@ class Trainer:
             
             val_data_generator = LimitedLenWrapper(self.val_number, data_loader=val_loader, transform=val_transforms,
                                                 num_processes=6, num_cached=3, seeds=None,
-                                                pin_memory=True, wait_time=0.02)
+                                                pin_memory=getattr(self, "pin_memory", True), wait_time=0.02)
         return data_generator, val_data_generator
 
 
@@ -513,4 +513,3 @@ class Trainer:
         self.model.load_state_dict(new_sd, strict=strict)
         
         print(f"model parameters are loaded successed.")
-

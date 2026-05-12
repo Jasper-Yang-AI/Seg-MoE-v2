@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -17,7 +18,7 @@ from .backend_data import (
     resolve_vendored_backend_root,
 )
 from .contracts import PredictionRecord
-from .io_utils import load_json, load_jsonl, save_jsonl
+from .io_utils import load_json, load_jsonl, save_json, save_jsonl, save_pickle
 from .labels import LAYER1_BACKGROUND_WEIGHT, build_layer1_high_recall_target, build_layer1_source_weight_map
 
 
@@ -214,15 +215,412 @@ def _collate(batch: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _save_state_and_delete_last(model: Any, save_path: str | Path, *, delete_symbol: str | None = None) -> None:
+    import torch
+
+    save_path = Path(save_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    if delete_symbol:
+        for old_path in save_path.parent.glob(f"{delete_symbol}*.pt"):
+            if old_path != save_path:
+                old_path.unlink()
+    torch.save(model.state_dict(), save_path)
+    print(f"model is saved in {save_path}", flush=True)
+
+
+def _dice_from_logits(logits: Any, target: Any, eps: float = 1e-8) -> float:
+    import torch
+
+    prediction = torch.sigmoid(logits) >= 0.5
+    target = target >= 0.5
+    dims = tuple(range(1, target.ndim))
+    tp = torch.logical_and(prediction, target).float().sum(dim=dims)
+    fp = torch.logical_and(prediction, ~target).float().sum(dim=dims)
+    fn = torch.logical_and(~prediction, target).float().sum(dim=dims)
+    dice = (2.0 * tp + eps) / (2.0 * tp + fp + fn + eps)
+    return float(dice.mean().detach().cpu())
+
+
+def _format_fold_path(path: str | Path, fold: int) -> Path:
+    return Path(str(path).format(fold=int(fold)))
+
+
+def _sample_foreground_locations(
+    seg: np.ndarray,
+    positive_label_values: Sequence[int],
+    *,
+    seed: int = 1234,
+) -> dict[int, np.ndarray]:
+    rng = np.random.RandomState(int(seed))
+    locations: dict[int, np.ndarray] = {}
+    for label_value in positive_label_values:
+        label = int(label_value)
+        all_locations = np.argwhere(np.asarray(seg) == label)
+        if len(all_locations) == 0:
+            locations[label] = np.empty((0, 4), dtype=np.int64)
+            continue
+        target_count = min(10_000, len(all_locations))
+        target_count = max(target_count, int(np.ceil(len(all_locations) * 0.01)))
+        locations[label] = all_locations[rng.choice(len(all_locations), target_count, replace=False)]
+    return locations
+
+
+def _source_npz_path(record: Mapping[str, Any]) -> Path:
+    npz_path = record.get("segmamba_npz") or record.get("image")
+    if not npz_path:
+        raise ValueError(f"Missing segmamba_npz/image for case_id={record.get('case_id', '<unknown>')}")
+    return Path(str(npz_path))
+
+
+def _original_case_filename(record: Mapping[str, Any]) -> str:
+    return f"{_source_npz_path(record).stem}.npz"
+
+
+def _link_or_copy_npz(source_path: Path, target_path: Path, *, link_mode: str) -> None:
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    if target_path.exists() or target_path.is_symlink():
+        target_path.unlink()
+    if link_mode == "copy":
+        shutil.copy2(source_path, target_path)
+    elif link_mode == "hardlink":
+        os.link(source_path, target_path)
+    else:
+        try:
+            target_path.symlink_to(source_path.resolve())
+        except OSError:
+            shutil.copy2(source_path, target_path)
+
+
+def _records_by_case(records: Sequence[Mapping[str, Any]]) -> dict[str, Mapping[str, Any]]:
+    return {str(record["case_id"]): record for record in records}
+
+
+def export_original_style_data(
+    config_path: str | Path,
+    *,
+    output_dir: str | Path,
+    folds: Sequence[int] | None = None,
+    link_mode: str = "symlink",
+    unpack: bool = False,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    config = load_json(config_path)
+    dataset_index = load_jsonl(config["dataset_index"])
+    split_metadata = load_json(config["split_metadata"]) if config.get("split_metadata") else {}
+    if folds is None:
+        folds = [int(fold) for fold in sorted(split_metadata.get("folds", {}).keys(), key=int)]
+    folds = list(folds or [0])
+
+    output_dir = Path(output_dir)
+    fullres_dir = output_dir / "fullres"
+    splits_dir = output_dir / "splits"
+    config_out = output_dir / "segmamba_original_config.json"
+    positive_label_values = tuple(int(v) for v in config.get("positive_label_values", LAYER1_POSITIVE_LABEL_VALUES))
+
+    summary: dict[str, Any] = {
+        "mode": "export-original",
+        "cases": len(dataset_index),
+        "folds": [int(fold) for fold in folds],
+        "fullres_dir": str(fullres_dir),
+        "config": str(config_out),
+        "link_mode": str(link_mode),
+    }
+    if dry_run:
+        return summary
+
+    from tqdm import tqdm
+
+    fullres_dir.mkdir(parents=True, exist_ok=True)
+    for record in tqdm(dataset_index, desc="Export original-style SegMamba data", mininterval=5):
+        source_path = _source_npz_path(record)
+        target_path = fullres_dir / _original_case_filename(record)
+        _link_or_copy_npz(source_path, target_path, link_mode=link_mode)
+        payload = np.load(str(source_path), allow_pickle=True)
+        source = np.asarray(payload["seg_source"] if "seg_source" in payload else payload["seg"], dtype=np.uint8)
+        properties = {
+            "case_id": str(record["case_id"]),
+            "class_locations": _sample_foreground_locations(source, positive_label_values),
+            "bbox_zyx": np.asarray(payload["bbox_zyx"], dtype=np.int64) if "bbox_zyx" in payload else None,
+            "native_shape_zyx": np.asarray(payload["native_shape_zyx"], dtype=np.int64)
+            if "native_shape_zyx" in payload
+            else None,
+            "positive_label_values": positive_label_values,
+        }
+        save_pickle(properties, target_path.with_suffix(".pkl"))
+
+    cases = _records_by_case(dataset_index)
+    test_records = load_jsonl(config["test_list"]) if config.get("test_list") else []
+    for fold in folds:
+        train_records = _load_records(config, fold=int(fold), split="train")
+        val_records = _load_records(config, fold=int(fold), split="val")
+        split_payload = {
+            "train": [_original_case_filename(cases[str(record["case_id"])]) for record in train_records],
+            "validation": [_original_case_filename(cases[str(record["case_id"])]) for record in val_records],
+            "test": [_original_case_filename(cases[str(record["case_id"])]) for record in test_records],
+        }
+        save_json(split_payload, splits_dir / f"fold_{int(fold)}_split.json")
+
+    original_config = dict(config)
+    original_config.update(
+        {
+            "data_format": "segmamba_original",
+            "original_data_dir": str(fullres_dir),
+            "original_split_pattern": str(splits_dir / "fold_{fold}_split.json"),
+            "logdir": str(output_dir / "logs" / "fold_{fold}"),
+            "checkpoint_dir": str(output_dir / "checkpoints"),
+            "batch_size": int(config.get("batch_size", 2)),
+            "train_process": int(config.get("train_process", 18)),
+            "val_process": int(config.get("val_process", 6)),
+            "steps_per_epoch": int(config.get("steps_per_epoch", 250)),
+            "val_batches": int(config.get("val_batches", 100)),
+            "optimizer": str(config.get("optimizer", "sgd")),
+            "learning_rate": float(config.get("learning_rate", 1e-2)),
+            "weight_decay": float(config.get("weight_decay", 3e-5)),
+            "momentum": float(config.get("momentum", 0.99)),
+            "nesterov": bool(config.get("nesterov", True)),
+            "scheduler_type": str(config.get("scheduler_type", "poly")),
+            "augmentation": config.get("augmentation", True),
+            "pin_memory": bool(config.get("pin_memory", False)),
+            "stop_on_nonfinite_loss": bool(config.get("stop_on_nonfinite_loss", True)),
+        }
+    )
+    save_json(original_config, config_out)
+
+    if unpack:
+        repo_root = config.get("repo_root") or resolve_vendored_backend_root("segmamba")
+        _insert_import_paths(repo_root)
+        from light_training.dataloading.utils import unpack_dataset
+
+        print(f"unpacking original-style data at {fullres_dir}", flush=True)
+        unpack_dataset(str(fullres_dir), unpack_segmentation=True, overwrite_existing=False, num_processes=8)
+    return summary
+
+
+def _load_original_style_paths(config: Mapping[str, Any], *, fold: int) -> tuple[list[str], list[str]]:
+    split_path = _format_fold_path(config["original_split_pattern"], int(fold))
+    split_payload = load_json(split_path)
+    data_dir = Path(str(config["original_data_dir"]))
+    train_paths = [str(data_dir / name) for name in split_payload["train"]]
+    val_paths = [str(data_dir / name) for name in split_payload["validation"]]
+    return train_paths, val_paths
+
+
+def _batch_source_to_target_and_weight(
+    source: Any,
+    positive_label_values: Sequence[int],
+    source_weights: Mapping[str, float],
+    background_weight: float,
+) -> tuple[Any, Any]:
+    import torch
+
+    source = source[:, 0].long()
+    target = torch.zeros_like(source, dtype=torch.float32)
+    weight = torch.full_like(target, float(background_weight), dtype=torch.float32)
+    for label_value in positive_label_values:
+        label = int(label_value)
+        mask = source == label
+        target[mask] = 1.0
+        weight[mask] = float(source_weights.get(str(label), source_weights.get(label, 1.0)))
+    return target[:, None], weight[:, None]
+
+
+def _build_original_optimizer(model: Any, config: Mapping[str, Any]) -> Any:
+    import torch
+
+    optimizer_name = str(config.get("optimizer", "sgd")).lower()
+    lr = float(config.get("learning_rate", 1e-2 if optimizer_name == "sgd" else 1e-4))
+    weight_decay = float(config.get("weight_decay", 3e-5 if optimizer_name == "sgd" else 0.0))
+    if optimizer_name == "adamw":
+        return torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    return torch.optim.SGD(
+        model.parameters(),
+        lr=lr,
+        weight_decay=weight_decay,
+        momentum=float(config.get("momentum", 0.99)),
+        nesterov=bool(config.get("nesterov", True)),
+    )
+
+
+def _train_original_style(
+    config: Mapping[str, Any],
+    *,
+    fold: int,
+    max_epochs: int,
+    summary: dict[str, Any],
+) -> dict[str, Any]:
+    import torch
+    import torch.distributed as dist
+
+    repo_root = config.get("repo_root") or resolve_vendored_backend_root("segmamba")
+    _insert_import_paths(repo_root)
+    from light_training.dataloading.dataset import MedicalDataset
+    from light_training.trainer import Trainer
+
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    env_type = "DDP" if world_size > 1 else "pytorch"
+    logdir = _format_fold_path(config.get("logdir", Path("logs") / f"fold_{int(fold)}"), int(fold))
+    checkpoint_dir = _format_fold_path(config.get("checkpoint_dir", Path("checkpoints")), int(fold))
+    patch_size = list(config.get("patch_size", [128, 128, 128]))
+    positive_label_values = tuple(int(v) for v in config.get("positive_label_values", LAYER1_POSITIVE_LABEL_VALUES))
+    source_weights = {
+        str(k): float(v) for k, v in dict(config.get("source_positive_weights", LAYER1_SOURCE_AWARE_WEIGHTS)).items()
+    }
+    background_weight = float(config.get("background_weight", LAYER1_BACKGROUND_WEIGHT))
+
+    class Layer1OriginalStyleTrainer(Trainer):
+        def get_dist_args(self) -> None:
+            self.local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+            self.not_call_launch = True
+            self.device = self.local_rank
+
+        def __init__(self) -> None:
+            super().__init__(
+                env_type=env_type,
+                max_epochs=int(max_epochs),
+                batch_size=int(config.get("batch_size", 2)),
+                device=str(config.get("device", "cuda:0" if torch.cuda.is_available() else "cpu")),
+                val_every=int(config.get("val_every", 2)),
+                num_gpus=max(1, world_size),
+                logdir=str(logdir),
+                master_port=int(config.get("master_port", 17759)),
+                training_script=__file__,
+                train_process=int(config.get("train_process", 18)),
+            )
+            self.model = build_segmamba_model(
+                repo_root=repo_root,
+                in_channels=int(config.get("input_channels", len(LAYER1_INPUT_CHANNELS))),
+                out_channels=1,
+            )
+            self.patch_size = patch_size
+            self.best_mean_dice = 0.0
+            self.augmentation = config.get("augmentation", True)
+            self.pin_memory = bool(config.get("pin_memory", False))
+            self.optimizer = _build_original_optimizer(self.model, config)
+            self.scheduler_type = str(config.get("scheduler_type", "poly"))
+            self.num_step_per_epoch = max(1, int(config.get("steps_per_epoch", 250)) // max(1, world_size))
+            self.val_number = max(1, int(config.get("val_batches", 100)) // max(1, world_size))
+
+        def training_step(self, batch: Mapping[str, Any]) -> Any:
+            image = batch["data"]
+            source = batch["seg"]
+            target, voxel_weight = _batch_source_to_target_and_weight(
+                source,
+                positive_label_values,
+                source_weights,
+                background_weight,
+            )
+            logits = self.model(image)
+            if logits.ndim == target.ndim - 1:
+                logits = logits[:, None]
+            loss = layer1_high_recall_loss(logits, target, voxel_weight)
+            if bool(config.get("stop_on_nonfinite_loss", True)) and not torch.isfinite(loss).all():
+                raise FloatingPointError(f"Non-finite SegMamba loss at epoch={self.epoch}, step={self.global_step}")
+            self.log("training_loss", loss, step=self.global_step)
+            return loss
+
+        def validation_step(self, batch: Mapping[str, Any]) -> float:
+            image = batch["data"]
+            source = batch["seg"]
+            target, _ = _batch_source_to_target_and_weight(
+                source,
+                positive_label_values,
+                source_weights,
+                background_weight,
+            )
+            logits = self.model(image)
+            if logits.ndim == target.ndim - 1:
+                logits = logits[:, None]
+            return _dice_from_logits(logits, target)
+
+        def validation_end(self, val_outputs: Any) -> None:
+            values = torch.as_tensor(val_outputs, dtype=torch.float32)
+            finite = values[torch.isfinite(values)]
+            mean_dice = float(finite.mean().item()) if finite.numel() else float("nan")
+            self.log("mean_dice", mean_dice, step=self.epoch)
+            print(f"mean_dice is {mean_dice}", flush=True)
+            model_to_save = self.model.module if hasattr(self.model, "module") else self.model
+            if mean_dice > self.best_mean_dice:
+                self.best_mean_dice = mean_dice
+                _save_state_and_delete_last(
+                    model_to_save,
+                    checkpoint_dir / f"best_model_fold{int(fold)}_{mean_dice:.4f}.pt",
+                    delete_symbol=f"best_model_fold{int(fold)}",
+                )
+            _save_state_and_delete_last(
+                model_to_save,
+                checkpoint_dir / f"final_model_fold{int(fold)}_{mean_dice:.4f}.pt",
+                delete_symbol=f"final_model_fold{int(fold)}",
+            )
+            if (self.epoch + 1) % 100 == 0:
+                torch.save(model_to_save.state_dict(), checkpoint_dir / f"tmp_model_fold{int(fold)}_ep{self.epoch}_{mean_dice:.4f}.pt")
+
+    trainer = Layer1OriginalStyleTrainer()
+    rank = int(os.environ.get("RANK", "0"))
+    if world_size > 1 and rank == 0 and bool(config.get("preunpack_original_data", True)):
+        from light_training.dataloading.utils import unpack_dataset
+
+        unpack_dataset(str(config["original_data_dir"]), unpack_segmentation=True, overwrite_existing=False, num_processes=8)
+    if world_size > 1 and dist.is_initialized():
+        dist.barrier()
+
+    train_paths, val_paths = _load_original_style_paths(config, fold=int(fold))
+    train_ds = MedicalDataset(train_paths)
+    val_ds = MedicalDataset(val_paths)
+    trainer.train(train_dataset=train_ds, val_dataset=val_ds)
+
+    is_main = int(os.environ.get("RANK", "0")) == 0
+    final_checkpoint_path = checkpoint_dir / f"segmamba_layer1_fold{int(fold)}.pt"
+    if is_main:
+        model_to_save = trainer.model.module if hasattr(trainer.model, "module") else trainer.model
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        torch.save(model_to_save.state_dict(), final_checkpoint_path)
+    if getattr(trainer, "writer", None) is not None:
+        trainer.writer.close()
+    if world_size > 1 and dist.is_initialized():
+        dist.destroy_process_group()
+    summary["checkpoint_path"] = str(final_checkpoint_path)
+    summary["best_mean_dice"] = float(trainer.best_mean_dice)
+    return summary
+
+
 def train(config_path: str | Path, *, fold: int, dry_run: bool = False, max_epochs: int = 1) -> dict[str, Any]:
     config = load_json(config_path)
-    train_records = _load_records(config, fold=int(fold), split="train")
-    val_records = _load_records(config, fold=int(fold), split="val")
+    data_format = str(config.get("data_format", "segmamba_npz"))
+    patch_size = list(config.get("patch_size", [128, 128, 128]))
+    logdir = _format_fold_path(config.get("logdir", Path(config_path).parent / "logs" / f"fold_{int(fold)}"), int(fold))
+    checkpoint_dir = _format_fold_path(config.get("checkpoint_dir", Path(config_path).parent / "checkpoints"), int(fold))
+    batch_size = int(config.get("batch_size", 2))
+    val_every = int(config.get("val_every", 2))
+    steps_per_epoch = int(config.get("steps_per_epoch", 250))
+    val_batches = int(config.get("val_batches", 100))
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    per_rank_steps = max(1, steps_per_epoch // max(1, world_size))
+
+    if data_format != "segmamba_original":
+        summary = {
+            "mode": "train",
+            "ready": False,
+            "fold": int(fold),
+            "data_format": data_format,
+            "required_data_format": "segmamba_original",
+            "export_command": (
+                "python -m segmoe_v2.segmamba_adapter export-original "
+                f"--config {config_path} --output-dir data/exports/segmamba_original --fold {int(fold)} --link-mode symlink --unpack"
+            ),
+        }
+        if dry_run:
+            return summary
+        raise ValueError(
+            "SegMamba training now only uses the source-style light_training.Trainer path. "
+            "Run export-original first and train with the generated segmamba_original_config.json."
+        )
+
+    train_paths, val_paths = _load_original_style_paths(config, fold=int(fold))
     summary = {
-        "mode": "train",
+        "mode": "train-original",
         "fold": int(fold),
-        "train_cases": len(train_records),
-        "val_cases": len(val_records),
+        "train_cases": len(train_paths),
+        "val_cases": len(val_paths),
         "input_channels": int(config.get("input_channels", len(LAYER1_INPUT_CHANNELS))),
         "output_channels": 1,
         "positive_label_values": list(config.get("positive_label_values", LAYER1_POSITIVE_LABEL_VALUES)),
@@ -231,49 +629,29 @@ def train(config_path: str | Path, *, fold: int, dry_run: bool = False, max_epoc
         },
         "background_weight": float(config.get("background_weight", LAYER1_BACKGROUND_WEIGHT)),
         "sampling_policy": dict(config.get("sampling_policy", {})),
-        "patch_size": list(config.get("patch_size", [128, 128, 128])),
+        "data_format": data_format,
+        "patch_size": patch_size,
+        "batch_size": batch_size,
+        "global_batch_size": batch_size * max(1, world_size),
+        "max_epochs": int(max_epochs),
+        "steps_per_epoch": steps_per_epoch,
+        "per_rank_steps": per_rank_steps,
+        "val_every": val_every,
+        "val_batches": val_batches,
+        "logdir": str(logdir),
+        "checkpoint_dir": str(checkpoint_dir),
+        "world_size": world_size,
+        "trainer": "external/SegMamba/light_training/trainer.py",
+        "optimizer": str(config.get("optimizer", "sgd")),
+        "learning_rate": float(config.get("learning_rate", 1e-2)),
+        "scheduler_type": str(config.get("scheduler_type", "poly")),
+        "augmentation": config.get("augmentation", True),
+        "pin_memory": bool(config.get("pin_memory", False)),
+        "stop_on_nonfinite_loss": bool(config.get("stop_on_nonfinite_loss", True)),
     }
     if dry_run:
         return summary
-
-    import torch
-    from torch.utils.data import DataLoader
-
-    repo_root = config.get("repo_root") or resolve_vendored_backend_root("segmamba")
-    model = build_segmamba_model(
-        repo_root=repo_root,
-        in_channels=int(config.get("input_channels", len(LAYER1_INPUT_CHANNELS))),
-        out_channels=1,
-    )
-    device = torch.device(str(config.get("device", "cuda" if torch.cuda.is_available() else "cpu")))
-    model.to(device)
-    dataset = SegMambaLayer1Dataset(
-        train_records,
-        positive_label_values=config.get("positive_label_values", LAYER1_POSITIVE_LABEL_VALUES),
-        patch_size=config.get("patch_size", [128, 128, 128]),
-        seed=int(config.get("seed", 42)),
-    )
-    loader = DataLoader(dataset, batch_size=int(config.get("batch_size", 1)), shuffle=True, collate_fn=_collate)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=float(config.get("learning_rate", 1e-4)))
-    model.train()
-    for _epoch in range(int(max_epochs)):
-        for batch in loader:
-            data = batch["data"].to(device)
-            target = batch["target"].to(device)
-            voxel_weight = batch["voxel_weight"].to(device)
-            logits = model(data)
-            if logits.ndim == target.ndim - 1:
-                logits = logits[:, None]
-            loss = layer1_high_recall_loss(logits, target, voxel_weight)
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            optimizer.step()
-    checkpoint_dir = Path(config.get("checkpoint_dir", Path(config_path).parent / "checkpoints"))
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint_path = checkpoint_dir / f"segmamba_layer1_fold{int(fold)}.pt"
-    torch.save({"state_dict": model.state_dict(), "config": dict(config), "fold": int(fold)}, checkpoint_path)
-    summary["checkpoint_path"] = str(checkpoint_path)
-    return summary
+    return _train_original_style(config, fold=int(fold), max_epochs=int(max_epochs), summary=summary)
 
 
 def predict(
@@ -431,6 +809,13 @@ def predict(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="SegMoE SegMamba Layer1 adapter")
     sub = parser.add_subparsers(dest="command", required=True)
+    export_parser = sub.add_parser("export-original")
+    export_parser.add_argument("--config", required=True)
+    export_parser.add_argument("--output-dir", required=True)
+    export_parser.add_argument("--fold", type=int, action="append", dest="folds")
+    export_parser.add_argument("--link-mode", choices=("symlink", "hardlink", "copy"), default="symlink")
+    export_parser.add_argument("--unpack", action="store_true")
+    export_parser.add_argument("--dry-run", action="store_true")
     train_parser = sub.add_parser("train")
     train_parser.add_argument("--config", required=True)
     train_parser.add_argument("--fold", type=int, required=True)
@@ -447,7 +832,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-    if args.command == "train":
+    if args.command == "export-original":
+        payload = export_original_style_data(
+            args.config,
+            output_dir=args.output_dir,
+            folds=args.folds,
+            link_mode=str(args.link_mode),
+            unpack=bool(args.unpack),
+            dry_run=bool(args.dry_run),
+        )
+    elif args.command == "train":
         payload = train(args.config, fold=int(args.fold), dry_run=bool(args.dry_run), max_epochs=int(args.max_epochs))
     else:
         payload = predict(
@@ -457,7 +851,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             checkpoint=args.checkpoint,
             dry_run=bool(args.dry_run),
         )
-    print(json.dumps(payload, indent=2, sort_keys=True))
+    if int(os.environ.get("RANK", "0")) == 0:
+        print(json.dumps(payload, indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":
