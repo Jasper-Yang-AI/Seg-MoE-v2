@@ -1,5 +1,11 @@
 from .calibration import TemperatureScaler, fit_temperature_scaler
-from .backend_data import export_mednext_task, export_nnunet_task, prepare_layer1_moe_data, prepare_segmamba_data
+from .backend_data import (
+    export_mednext_task,
+    export_nnunet_task,
+    prepare_layer1_moe_data,
+    prepare_layer2_moe_data,
+    prepare_segmamba_data,
+)
 from .contracts import (
     CalibrationRecord,
     CaseManifestRow,
@@ -48,6 +54,7 @@ __all__ = [
     "load_gland_crop_manifest",
     "merge_prediction_manifest_files",
     "prepare_layer1_moe_data",
+    "prepare_layer2_moe_data",
     "prepare_segmamba_data",
     "scan_case_roots",
     "write_fp_bank",

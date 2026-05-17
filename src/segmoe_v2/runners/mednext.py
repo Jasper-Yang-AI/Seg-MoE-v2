@@ -102,6 +102,7 @@ class MedNeXtRunner(BaseRunner):
             if task_spec.name == "lesion"
             else "nnUNetTrainerV2_MedNeXt_S_kernel3",
         )
+        stage = str(experiment_cfg.get("stage", "layer2" if "Layer2" in str(trainer) else "layer1"))
         plans = experiment_cfg.get("plans", "nnUNetPlansv2.1_trgSp_1x1x1")
         command = self._entry_command(
             experiment_cfg,
@@ -134,6 +135,7 @@ class MedNeXtRunner(BaseRunner):
         return [
             {
                 "case_id": case.case_id,
+                "stage": stage,
                 "fold": int(fold),
                 "split": str(split_name),
                 "channel_names": ("background", "P_lesion"),

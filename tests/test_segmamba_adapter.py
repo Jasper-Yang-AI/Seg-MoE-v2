@@ -51,6 +51,23 @@ def test_segmamba_adapter_train_dry_run_requires_original_style_config(tmp_path:
     assert "export-original" in train_summary["export_command"]
     assert predict_summary["logit_field"] == "logits"
 
+    layer2_config = tmp_path / "segmamba_layer2_config.json"
+    save_json(
+        {
+            "stage": "layer2",
+            "train_list_pattern": str(tmp_path / "fold_{fold}_train.jsonl"),
+            "val_list_pattern": str(tmp_path / "fold_{fold}_val.jsonl"),
+            "test_list": str(tmp_path / "test.jsonl"),
+            "input_channels": 12,
+            "positive_label_values": [1],
+        },
+        layer2_config,
+    )
+    layer2_summary = train(layer2_config, fold=0, dry_run=True)
+
+    assert layer2_summary["stage"] == "layer2"
+    assert "data/exports/layer2/segmamba_original" in layer2_summary["export_command"]
+
 
 def test_segmamba_dataset_samples_layer1_patch_with_mimic_positive(tmp_path: Path) -> None:
     data = np.zeros((6, 8, 8, 8), dtype=np.float32)
@@ -125,6 +142,7 @@ def test_export_original_style_data_writes_class_locations(tmp_path: Path) -> No
     assert summary["cases"] == 1
     assert original_config.exists()
     assert train_summary["data_format"] == "segmamba_original"
+    assert train_summary["checkpoint_path"].endswith("segmamba_layer1_fold0.pt")
     assert train_summary["trainer"] == "external/SegMamba/light_training/trainer.py"
     assert train_summary["train_cases"] == 1
     assert train_summary["batch_size"] == 2

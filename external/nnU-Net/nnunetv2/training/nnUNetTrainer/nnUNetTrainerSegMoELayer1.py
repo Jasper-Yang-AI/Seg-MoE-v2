@@ -22,6 +22,11 @@ from segmoe_v2.layer1 import (
     layer1_source_aware_loss,
     layer1_tp_fp_fn_tn,
 )
+from segmoe_v2.layer2 import (
+    LAYER2_PROBABILITY_CHANNELS,
+    layer2_hard_negative_loss,
+    layer2_tp_fp_fn_tn,
+)
 
 
 class nnUNetTrainerSegMoELayer1(nnUNetTrainer):
@@ -34,6 +39,10 @@ class nnUNetTrainerSegMoELayer1(nnUNetTrainer):
 
     source_positive_weights = {1: 1.25, 2: 0.75}
     head_channel_names: Tuple[str, ...] = LAYER1_PROBABILITY_CHANNELS
+    prediction_stage = "layer1"
+    prediction_model_name = "nnUNet"
+    metric_name = "candidate"
+    training_metadata = {"source_aware_training": True}
     filtered_validation_min_dice = 0.30
 
     @staticmethod
@@ -113,6 +122,9 @@ class nnUNetTrainerSegMoELayer1(nnUNetTrainer):
             return total
         return self.loss(output, target)
 
+    def _tp_fp_fn_tn(self, logits: torch.Tensor, raw_target: torch.Tensor):
+        return layer1_tp_fp_fn_tn(logits, raw_target)
+
     def train_step(self, batch: dict) -> dict:
         data = batch["data"].to(self.device, non_blocking=True)
         target = batch["target"]
@@ -150,7 +162,7 @@ class nnUNetTrainerSegMoELayer1(nnUNetTrainer):
             output = self.network(data)
             loss = self._compute_loss(output, target)
         logits_for_metrics = output[0] if isinstance(output, (list, tuple)) else output
-        tp, fp, fn, _tn = layer1_tp_fp_fn_tn(logits_for_metrics, target_for_metrics)
+        tp, fp, fn, _tn = self._tp_fp_fn_tn(logits_for_metrics, target_for_metrics)
         return {"loss": loss.detach().cpu().numpy(), "tp_hard": tp, "fp_hard": fp, "fn_hard": fn}
 
     def on_validation_epoch_end(self, val_outputs: List[dict]):
@@ -223,7 +235,7 @@ class nnUNetTrainerSegMoELayer1(nnUNetTrainer):
                 logits = predictor.predict_sliding_window_return_logits(torch.from_numpy(data)).cpu()
             probabilities = torch.sigmoid(logits).numpy().astype(np.float32)
             target = torch.from_numpy(np.asarray(seg))[None]
-            tp, fp, fn, tn = layer1_tp_fp_fn_tn(logits[None], target)
+            tp, fp, fn, tn = self._tp_fp_fn_tn(logits[None], target)
             denominator = 2 * tp[0] + fp[0] + fn[0]
             dice = float(2 * tp[0] / denominator) if denominator > 0 else float("nan")
             metric_per_case.append(
@@ -231,7 +243,7 @@ class nnUNetTrainerSegMoELayer1(nnUNetTrainer):
                     "reference_file": case_id,
                     "prediction_file": str(Path(validation_output_folder) / f"{case_id}.npz") if save_probabilities else case_id,
                     "metrics": {
-                        "candidate": {
+                        self.metric_name: {
                             "Dice": dice,
                             "FP": float(fp[0]),
                             "TP": float(tp[0]),
@@ -252,8 +264,8 @@ class nnUNetTrainerSegMoELayer1(nnUNetTrainer):
                 manifest_records.append(
                     {
                         "task": "lesion",
-                        "stage": "layer1",
-                        "model_name": "nnUNet",
+                        "stage": self.prediction_stage,
+                        "model_name": self.prediction_model_name,
                         "case_id": case_id,
                         "fold": int(self.fold),
                         "split": f"val_{self.fold}",
@@ -261,20 +273,20 @@ class nnUNetTrainerSegMoELayer1(nnUNetTrainer):
                         "channel_names": list(self.head_channel_names),
                         "prob_path": str(prob_path),
                         "source_manifest_hash": str(self.dataset_json.get("segmoe_source_manifest_hash", "")),
-                        "source_aware_training": True,
+                        **dict(self.training_metadata),
                     }
                 )
 
-        mean_dice = float(np.nanmean([item["metrics"]["candidate"]["Dice"] for item in metric_per_case]))
+        mean_dice = float(np.nanmean([item["metrics"][self.metric_name]["Dice"] for item in metric_per_case]))
         min_dice = float(os.environ.get("SEGMOE_LAYER1_FILTER_MIN_DICE", self.filtered_validation_min_dice))
         filtered_metric_per_case = [
             item
             for item in metric_per_case
-            if np.isfinite(float(item["metrics"]["candidate"]["Dice"]))
-            and float(item["metrics"]["candidate"]["Dice"]) >= min_dice
+            if np.isfinite(float(item["metrics"][self.metric_name]["Dice"]))
+            and float(item["metrics"][self.metric_name]["Dice"]) >= min_dice
         ]
         filtered_mean_dice = (
-            float(np.nanmean([item["metrics"]["candidate"]["Dice"] for item in filtered_metric_per_case]))
+            float(np.nanmean([item["metrics"][self.metric_name]["Dice"] for item in filtered_metric_per_case]))
             if filtered_metric_per_case
             else float("nan")
         )
@@ -283,17 +295,17 @@ class nnUNetTrainerSegMoELayer1(nnUNetTrainer):
         ]
         summary = {
             "metric_per_case": metric_per_case,
-            "mean": {"candidate": {"Dice": mean_dice}},
+            "mean": {self.metric_name: {"Dice": mean_dice}},
             "foreground_mean": {"Dice": mean_dice},
             "filtered": {
                 "min_dice": min_dice,
                 "case_count": len(filtered_metric_per_case),
                 "excluded_case_count": len(filtered_excluded_case_ids),
                 "excluded_case_ids": filtered_excluded_case_ids,
-                "mean": {"candidate": {"Dice": filtered_mean_dice}},
+                "mean": {self.metric_name: {"Dice": filtered_mean_dice}},
             },
             "channel_names": list(self.head_channel_names),
-            "source_aware_training": True,
+            **dict(self.training_metadata),
         }
         save_summary_json(summary, join(validation_output_folder, "summary.json"))
         if save_probabilities and manifest_records:
@@ -301,11 +313,43 @@ class nnUNetTrainerSegMoELayer1(nnUNetTrainer):
                 for record in manifest_records:
                     handle.write(json.dumps(record, ensure_ascii=False) + "\n")
         self.print_to_log_file("Validation complete", also_print_to_console=True)
-        self.print_to_log_file("Mean Layer1 Candidate Dice: ", np.round(mean_dice, decimals=4), also_print_to_console=True)
         self.print_to_log_file(
-            "Filtered Layer1 Candidate Dice: ",
+            f"Mean {self.prediction_stage} {self.metric_name} Dice: ",
+            np.round(mean_dice, decimals=4),
+            also_print_to_console=True,
+        )
+        self.print_to_log_file(
+            f"Filtered {self.prediction_stage} {self.metric_name} Dice: ",
             np.round(filtered_mean_dice, decimals=4),
             f"kept {len(filtered_metric_per_case)}/{len(metric_per_case)} cases",
             also_print_to_console=True,
         )
         self.set_deep_supervision_enabled(True)
+
+
+class nnUNetTrainerSegMoELayer2(nnUNetTrainerSegMoELayer1):
+    """Layer2 PCA refinement trainer with hard negatives.
+
+    Labels are expected to use Layer2 source semantics:
+    0=background, 1=PCA lesion positive, 2=NCA mimic or Layer1 FP hard negative.
+    The network predicts one sigmoid lesion head; only label 1 is positive.
+    """
+
+    source_weights = {1: 1.25, 2: 2.5}
+    head_channel_names: Tuple[str, ...] = LAYER2_PROBABILITY_CHANNELS
+    prediction_stage = "layer2"
+    metric_name = "lesion"
+    training_metadata = {"hard_negative_training": True}
+
+    def _build_loss(self):
+        def _loss(logits: torch.Tensor, raw_target: torch.Tensor) -> torch.Tensor:
+            return layer2_hard_negative_loss(
+                logits,
+                raw_target,
+                source_weights=self.source_weights,
+            )
+
+        return _loss
+
+    def _tp_fp_fn_tn(self, logits: torch.Tensor, raw_target: torch.Tensor):
+        return layer2_tp_fp_fn_tn(logits, raw_target)

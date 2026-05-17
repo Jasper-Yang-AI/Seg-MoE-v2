@@ -317,7 +317,10 @@ class NetworkTrainer(object):
         if not self.was_initialized:
             self.initialize(train)
         # saved_model = torch.load(fname, map_location=torch.device('cuda', torch.cuda.current_device()))
-        saved_model = torch.load(fname, map_location=torch.device('cpu'))
+        try:
+            saved_model = torch.load(fname, map_location=torch.device('cpu'), weights_only=False)
+        except TypeError:
+            saved_model = torch.load(fname, map_location=torch.device('cpu'))
         self.load_checkpoint_ram(saved_model, train)
 
     @abstractmethod

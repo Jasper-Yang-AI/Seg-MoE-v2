@@ -297,6 +297,115 @@ class _Layer1SourceAwareMedNeXtMixin:
             self.gt_niftis_folder = original_gt_folder
 
 
+class Layer2HardNegativeCELoss(nn.Module):
+    """Layer2 loss for source labels 0/1/2.
+
+    Label 1 is the PCA lesion positive class. Label 2 is a hard negative from
+    NCA mimics or Layer1 FP components.
+    """
+
+    def __init__(self, *, background_weight=1.0, source_weights=None, smooth=1e-5):
+        super().__init__()
+        self.background_weight = float(background_weight)
+        self.source_weights = dict(source_weights or {1: 1.25, 2: 2.5})
+        self.smooth = float(smooth)
+
+    @staticmethod
+    def _squeeze_target(target):
+        if target.ndim >= 4 and target.shape[1] == 1:
+            return target[:, 0]
+        return target
+
+    def _binary_target_and_weights(self, raw_target, device):
+        target = self._squeeze_target(raw_target).long().to(device)
+        binary_target = (target == 1).long()
+        weights = torch.full(binary_target.shape, self.background_weight, dtype=torch.float32, device=device)
+        for label_value, weight in self.source_weights.items():
+            weights = torch.where(target == int(label_value), torch.as_tensor(float(weight), device=device), weights)
+        return binary_target, weights
+
+    def forward(self, net_output, target):
+        if net_output.shape[1] != 2:
+            raise ValueError(f"Layer2 MedNeXt expects a 2-channel softmax head, got {tuple(net_output.shape)}")
+        binary_target, weights = self._binary_target_and_weights(target, net_output.device)
+        ce = F.cross_entropy(net_output, binary_target, reduction="none")
+        ce = (ce * weights).sum() / weights.sum().clamp_min(1.0)
+
+        probabilities = softmax_helper(net_output)[:, 1:2]
+        target_float = binary_target[:, None].float()
+        weights = weights[:, None]
+        spatial_axes = tuple(range(2, probabilities.ndim))
+        intersection = (probabilities * target_float * weights).sum(dim=spatial_axes)
+        denominator = ((probabilities + target_float) * weights).sum(dim=spatial_axes)
+        dice = (2.0 * intersection + self.smooth) / (denominator + self.smooth)
+        return ce + (1.0 - dice).mean()
+
+
+class _Layer2HardNegativeMedNeXtMixin:
+    source_weights = {1: 1.25, 2: 2.5}
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.initial_lr = 5e-4
+        self.loss = Layer2HardNegativeCELoss(
+            background_weight=1.0,
+            source_weights=self.source_weights,
+        )
+        self.pin_memory = False
+
+    def process_plans(self, plans):
+        super().process_plans(plans)
+        self.num_classes = 2
+        self.classes = [1]
+
+    @staticmethod
+    def _target_positive(target, device):
+        if target.ndim >= 4 and target.shape[1] == 1:
+            target = target[:, 0]
+        target = target.long().to(device)
+        return target == 1
+
+    def run_online_evaluation(self, output, target):
+        with torch.no_grad():
+            target = target[0] if isinstance(target, (tuple, list)) else target
+            output = output[0] if isinstance(output, (tuple, list)) else output
+            output_seg = softmax_helper(output).argmax(1)
+            target_positive = self._target_positive(target, output_seg.device)
+            output_positive = output_seg == 1
+            axes = tuple(range(1, target_positive.ndim))
+            tp_hard = (output_positive & target_positive).float().sum(dim=axes).sum()
+            fp_hard = (output_positive & (~target_positive)).float().sum(dim=axes).sum()
+            fn_hard = ((~output_positive) & target_positive).float().sum(dim=axes).sum()
+
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                torch.distributed.all_reduce(tp_hard, op=torch.distributed.ReduceOp.SUM)
+                torch.distributed.all_reduce(fp_hard, op=torch.distributed.ReduceOp.SUM)
+                torch.distributed.all_reduce(fn_hard, op=torch.distributed.ReduceOp.SUM)
+
+            tp_hard = float(tp_hard.detach().cpu().item())
+            fp_hard = float(fp_hard.detach().cpu().item())
+            fn_hard = float(fn_hard.detach().cpu().item())
+            self.online_eval_foreground_dc.append([float((2 * tp_hard) / (2 * tp_hard + fp_hard + fn_hard + 1e-8))])
+            self.online_eval_tp.append([tp_hard])
+            self.online_eval_fp.append([fp_hard])
+            self.online_eval_fn.append([fn_hard])
+
+    def compute_loss(self, output, target):
+        outputs = output if isinstance(output, (tuple, list)) else [output]
+        targets = target if isinstance(target, (tuple, list)) else [target] * len(outputs)
+        weights = self.ds_loss_weights if self.ds_loss_weights is not None else np.ones(len(outputs), dtype=np.float32)
+        total_loss = None
+        for i, net_output in enumerate(outputs):
+            weight = float(weights[i]) if i < len(weights) else 0.0
+            if weight == 0.0:
+                zero_loss = net_output.sum() * 0.0
+                total_loss = zero_loss if total_loss is None else total_loss + zero_loss
+                continue
+            loss = weight * self.loss(net_output, targets[i])
+            total_loss = loss if total_loss is None else total_loss + loss
+        return total_loss if total_loss is not None else outputs[0].sum() * 0.0
+
+
 class nnUNetTrainerV2_MedNeXt_S_kernel3_SegMoELayer1(
     _Layer1SourceAwareMedNeXtMixin,
     nnUNetTrainerV2_MedNeXt_S_kernel3,
@@ -306,6 +415,20 @@ class nnUNetTrainerV2_MedNeXt_S_kernel3_SegMoELayer1(
 
 class nnUNetTrainerV2_DDP_MedNeXt_S_kernel3_SegMoELayer1(
     _Layer1SourceAwareMedNeXtMixin,
+    nnUNetTrainerV2_DDP_MedNeXt_S_kernel3,
+):
+    pass
+
+
+class nnUNetTrainerV2_MedNeXt_S_kernel3_SegMoELayer2(
+    _Layer2HardNegativeMedNeXtMixin,
+    nnUNetTrainerV2_MedNeXt_S_kernel3,
+):
+    pass
+
+
+class nnUNetTrainerV2_DDP_MedNeXt_S_kernel3_SegMoELayer2(
+    _Layer2HardNegativeMedNeXtMixin,
     nnUNetTrainerV2_DDP_MedNeXt_S_kernel3,
 ):
     pass

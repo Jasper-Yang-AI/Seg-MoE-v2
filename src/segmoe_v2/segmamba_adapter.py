@@ -416,11 +416,13 @@ def _batch_source_to_target_and_weight(
     source = source[:, 0].long()
     target = torch.zeros_like(source, dtype=torch.float32)
     weight = torch.full_like(target, float(background_weight), dtype=torch.float32)
+    for label_value, label_weight in source_weights.items():
+        label = int(label_value)
+        weight[source == label] = float(label_weight)
     for label_value in positive_label_values:
         label = int(label_value)
         mask = source == label
         target[mask] = 1.0
-        weight[mask] = float(source_weights.get(str(label), source_weights.get(label, 1.0)))
     return target[:, None], weight[:, None]
 
 
@@ -458,16 +460,18 @@ def _train_original_style(
 
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     env_type = "DDP" if world_size > 1 else "pytorch"
+    stage = str(config.get("stage", "layer1"))
     logdir = _format_fold_path(config.get("logdir", Path("logs") / f"fold_{int(fold)}"), int(fold))
     checkpoint_dir = _format_fold_path(config.get("checkpoint_dir", Path("checkpoints")), int(fold))
     patch_size = list(config.get("patch_size", [128, 128, 128]))
     positive_label_values = tuple(int(v) for v in config.get("positive_label_values", LAYER1_POSITIVE_LABEL_VALUES))
     source_weights = {
-        str(k): float(v) for k, v in dict(config.get("source_positive_weights", LAYER1_SOURCE_AWARE_WEIGHTS)).items()
+        str(k): float(v)
+        for k, v in dict(config.get("source_label_weights", config.get("source_positive_weights", LAYER1_SOURCE_AWARE_WEIGHTS))).items()
     }
     background_weight = float(config.get("background_weight", LAYER1_BACKGROUND_WEIGHT))
 
-    class Layer1OriginalStyleTrainer(Trainer):
+    class SegMambaOriginalStyleTrainer(Trainer):
         def get_dist_args(self) -> None:
             self.local_rank = int(os.environ.get("LOCAL_RANK", "0"))
             self.not_call_launch = True
@@ -554,7 +558,7 @@ def _train_original_style(
             if (self.epoch + 1) % 100 == 0:
                 torch.save(model_to_save.state_dict(), checkpoint_dir / f"tmp_model_fold{int(fold)}_ep{self.epoch}_{mean_dice:.4f}.pt")
 
-    trainer = Layer1OriginalStyleTrainer()
+    trainer = SegMambaOriginalStyleTrainer()
     rank = int(os.environ.get("RANK", "0"))
     if world_size > 1 and rank == 0 and bool(config.get("preunpack_original_data", True)):
         from light_training.dataloading.utils import unpack_dataset
@@ -569,7 +573,7 @@ def _train_original_style(
     trainer.train(train_dataset=train_ds, val_dataset=val_ds)
 
     is_main = int(os.environ.get("RANK", "0")) == 0
-    final_checkpoint_path = checkpoint_dir / f"segmamba_layer1_fold{int(fold)}.pt"
+    final_checkpoint_path = checkpoint_dir / f"segmamba_{stage}_fold{int(fold)}.pt"
     if is_main:
         model_to_save = trainer.model.module if hasattr(trainer.model, "module") else trainer.model
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -586,6 +590,7 @@ def _train_original_style(
 def train(config_path: str | Path, *, fold: int, dry_run: bool = False, max_epochs: int = 1) -> dict[str, Any]:
     config = load_json(config_path)
     data_format = str(config.get("data_format", "segmamba_npz"))
+    stage = str(config.get("stage", "layer1"))
     patch_size = list(config.get("patch_size", [128, 128, 128]))
     logdir = _format_fold_path(config.get("logdir", Path(config_path).parent / "logs" / f"fold_{int(fold)}"), int(fold))
     checkpoint_dir = _format_fold_path(config.get("checkpoint_dir", Path(config_path).parent / "checkpoints"), int(fold))
@@ -597,15 +602,17 @@ def train(config_path: str | Path, *, fold: int, dry_run: bool = False, max_epoc
     per_rank_steps = max(1, steps_per_epoch // max(1, world_size))
 
     if data_format != "segmamba_original":
+        original_output_dir = "data/exports/layer2/segmamba_original" if stage == "layer2" else "data/exports/segmamba_original"
         summary = {
             "mode": "train",
+            "stage": stage,
             "ready": False,
             "fold": int(fold),
             "data_format": data_format,
             "required_data_format": "segmamba_original",
             "export_command": (
                 "python -m segmoe_v2.segmamba_adapter export-original "
-                f"--config {config_path} --output-dir data/exports/segmamba_original --fold {int(fold)} --link-mode symlink --unpack"
+                f"--config {config_path} --output-dir {original_output_dir} --fold {int(fold)} --link-mode symlink --unpack"
             ),
         }
         if dry_run:
@@ -618,6 +625,7 @@ def train(config_path: str | Path, *, fold: int, dry_run: bool = False, max_epoc
     train_paths, val_paths = _load_original_style_paths(config, fold=int(fold))
     summary = {
         "mode": "train-original",
+        "stage": stage,
         "fold": int(fold),
         "train_cases": len(train_paths),
         "val_cases": len(val_paths),
@@ -625,7 +633,12 @@ def train(config_path: str | Path, *, fold: int, dry_run: bool = False, max_epoc
         "output_channels": 1,
         "positive_label_values": list(config.get("positive_label_values", LAYER1_POSITIVE_LABEL_VALUES)),
         "source_positive_weights": {
-            str(k): float(v) for k, v in dict(config.get("source_positive_weights", LAYER1_SOURCE_AWARE_WEIGHTS)).items()
+            str(k): float(v)
+            for k, v in dict(config.get("source_label_weights", config.get("source_positive_weights", LAYER1_SOURCE_AWARE_WEIGHTS))).items()
+        },
+        "source_label_weights": {
+            str(k): float(v)
+            for k, v in dict(config.get("source_label_weights", config.get("source_positive_weights", LAYER1_SOURCE_AWARE_WEIGHTS))).items()
         },
         "background_weight": float(config.get("background_weight", LAYER1_BACKGROUND_WEIGHT)),
         "sampling_policy": dict(config.get("sampling_policy", {})),
@@ -640,6 +653,7 @@ def train(config_path: str | Path, *, fold: int, dry_run: bool = False, max_epoc
         "val_batches": val_batches,
         "logdir": str(logdir),
         "checkpoint_dir": str(checkpoint_dir),
+        "checkpoint_path": str(checkpoint_dir / f"segmamba_{stage}_fold{int(fold)}.pt"),
         "world_size": world_size,
         "trainer": "external/SegMamba/light_training/trainer.py",
         "optimizer": str(config.get("optimizer", "sgd")),
@@ -665,8 +679,11 @@ def predict(
     config = load_json(config_path)
     records = _load_records(config, fold=int(fold), split=split)
     output_dir = Path(config.get("prediction_dir", Path(config_path).parent / "predictions" / f"fold_{fold}" / split))
+    stage = str(config.get("stage", "layer1"))
+    metric_name = str(config.get("metric_name", "candidate" if stage == "layer1" else "lesion"))
     summary = {
         "mode": "predict",
+        "stage": stage,
         "fold": int(fold),
         "split": str(split),
         "cases": len(records),
@@ -726,7 +743,7 @@ def predict(
                     "reference_file": case_id,
                     "prediction_file": str(output_dir / f"{case_id}.npz"),
                     "metrics": {
-                        "candidate": {
+                        metric_name: {
                             "Dice": dice,
                             "FP": fp,
                             "TP": tp,
@@ -754,7 +771,7 @@ def predict(
             prediction_records.append(
                 PredictionRecord(
                     task="lesion",
-                    stage="layer1",
+                    stage=stage,
                     model_name="SegMamba",
                     fold=int(fold),
                     split=str(split),
@@ -771,15 +788,15 @@ def predict(
     summary["prediction_manifest"] = str(manifest_path)
     if metric_per_case:
         min_dice = float(config.get("filtered_validation_min_dice", os.environ.get("SEGMOE_LAYER1_FILTER_MIN_DICE", 0.30)))
-        mean_dice = float(np.nanmean([item["metrics"]["candidate"]["Dice"] for item in metric_per_case]))
+        mean_dice = float(np.nanmean([item["metrics"][metric_name]["Dice"] for item in metric_per_case]))
         filtered_metric_per_case = [
             item
             for item in metric_per_case
-            if np.isfinite(float(item["metrics"]["candidate"]["Dice"]))
-            and float(item["metrics"]["candidate"]["Dice"]) >= min_dice
+            if np.isfinite(float(item["metrics"][metric_name]["Dice"]))
+            and float(item["metrics"][metric_name]["Dice"]) >= min_dice
         ]
         filtered_mean_dice = (
-            float(np.nanmean([item["metrics"]["candidate"]["Dice"] for item in filtered_metric_per_case]))
+            float(np.nanmean([item["metrics"][metric_name]["Dice"] for item in filtered_metric_per_case]))
             if filtered_metric_per_case
             else float("nan")
         )
@@ -789,14 +806,14 @@ def predict(
         summary.update(
             {
                 "metric_per_case": metric_per_case,
-                "mean": {"candidate": {"Dice": mean_dice}},
+                "mean": {metric_name: {"Dice": mean_dice}},
                 "foreground_mean": {"Dice": mean_dice},
                 "filtered": {
                     "min_dice": min_dice,
                     "case_count": len(filtered_metric_per_case),
                     "excluded_case_count": len(filtered_excluded_case_ids),
                     "excluded_case_ids": filtered_excluded_case_ids,
-                    "mean": {"candidate": {"Dice": filtered_mean_dice}},
+                    "mean": {metric_name: {"Dice": filtered_mean_dice}},
                 },
             }
         )

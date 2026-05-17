@@ -5,7 +5,13 @@ from pathlib import Path
 from typing import Sequence
 
 from ..anatomy_visual_qc import generate_anatomy_visual_qc
-from ..backend_data import export_mednext_task, export_nnunet_task, prepare_layer1_moe_data, prepare_segmamba_data
+from ..backend_data import (
+    export_mednext_task,
+    export_nnunet_task,
+    prepare_layer1_moe_data,
+    prepare_layer2_moe_data,
+    prepare_segmamba_data,
+)
 from ..gland_crop import (
     DEFAULT_MARGIN_MM,
     DEFAULT_MIN_CROP_SIZE_ZYX,
@@ -117,6 +123,26 @@ def build_parser() -> argparse.ArgumentParser:
     layer1_moe.add_argument("--mednext-dataset-id", type=int, default=502)
     layer1_moe.add_argument("--mednext-dataset-name", default="ProstateLayer1")
     layer1_moe.add_argument("--segmamba-output-dir", default="data/exports/segmamba")
+
+    layer2_moe = sub.add_parser("prepare-layer2-moe", help="Export nnU-Net, MedNeXt, and SegMamba Layer2 data")
+    layer2_moe.add_argument("--manifest", required=True)
+    layer2_moe.add_argument("--anatomy-predictions", required=True)
+    layer2_moe.add_argument("--crop-manifest", required=True)
+    layer2_moe.add_argument(
+        "--layer1-predictions",
+        "--layer1-prediction-manifests",
+        nargs="+",
+        required=True,
+        dest="layer1_predictions",
+    )
+    layer2_moe.add_argument("--config-out", default="data/exports/layer2/layer2_moe_config.json")
+    layer2_moe.add_argument("--nnunet-task-root", default="nnUNet_raw")
+    layer2_moe.add_argument("--nnunet-dataset-id", type=int, default=503)
+    layer2_moe.add_argument("--nnunet-dataset-name", default="ProstateLayer2")
+    layer2_moe.add_argument("--mednext-task-root", default="MedNeXt_raw_data_base/nnUNet_raw_data")
+    layer2_moe.add_argument("--mednext-dataset-id", type=int, default=503)
+    layer2_moe.add_argument("--mednext-dataset-name", default="ProstateLayer2")
+    layer2_moe.add_argument("--segmamba-output-dir", default="data/exports/layer2/segmamba")
 
     geometry_audit = sub.add_parser("audit-geometry", help="Audit multimodal geometry consistency for all manifest cases")
     geometry_audit.add_argument("--manifest", required=True)
@@ -330,6 +356,24 @@ def main(argv: Sequence[str] | None = None) -> None:
             segmamba_output_dir=args.segmamba_output_dir,
         )
         print(f"Layer1 MoE config written to {outputs['layer1_moe_config']}")
+        return
+
+    if args.command == "prepare-layer2-moe":
+        outputs = prepare_layer2_moe_data(
+            rows,
+            anatomy_prediction_manifest=args.anatomy_predictions,
+            crop_manifest=args.crop_manifest,
+            layer1_prediction_manifests=args.layer1_predictions,
+            config_out=args.config_out,
+            nnunet_task_root=args.nnunet_task_root,
+            nnunet_dataset_id=int(args.nnunet_dataset_id),
+            nnunet_dataset_name=args.nnunet_dataset_name,
+            mednext_task_root=args.mednext_task_root,
+            mednext_dataset_id=int(args.mednext_dataset_id),
+            mednext_dataset_name=args.mednext_dataset_name,
+            segmamba_output_dir=args.segmamba_output_dir,
+        )
+        print(f"Layer2 MoE config written to {outputs['layer2_moe_config']}")
         return
 
     if args.command == "audit-geometry":

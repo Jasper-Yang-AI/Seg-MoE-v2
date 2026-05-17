@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from segmoe_v2.cli.main import main
+from segmoe_v2.cli.main import build_parser, main
 
 
 def _write_case(root: Path, case_id: str) -> None:
@@ -195,3 +195,30 @@ def test_cli_manifest_and_backend_exports(tmp_path: Path) -> None:
     split_metadata = __import__("json").loads((segmamba_output / "split_metadata.json").read_text(encoding="utf-8"))
     assert split_metadata["task"] == "anatomy"
     assert split_metadata["model"] == "SegMamba"
+
+
+def test_cli_prepare_layer2_moe_defaults() -> None:
+    args = build_parser().parse_args(
+        [
+            "prepare-layer2-moe",
+            "--manifest",
+            "cases.jsonl",
+            "--anatomy-predictions",
+            "anatomy.jsonl",
+            "--crop-manifest",
+            "crops.jsonl",
+            "--layer1-predictions",
+            "nnunet.jsonl",
+            "mednext.jsonl",
+            "segmamba.jsonl",
+        ]
+    )
+
+    assert args.command == "prepare-layer2-moe"
+    assert args.config_out == "data/exports/layer2/layer2_moe_config.json"
+    assert args.nnunet_dataset_id == 503
+    assert args.nnunet_dataset_name == "ProstateLayer2"
+    assert args.mednext_dataset_id == 503
+    assert args.mednext_dataset_name == "ProstateLayer2"
+    assert args.segmamba_output_dir == "data/exports/layer2/segmamba"
+    assert args.layer1_predictions == ["nnunet.jsonl", "mednext.jsonl", "segmamba.jsonl"]

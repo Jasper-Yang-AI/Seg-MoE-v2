@@ -49,6 +49,13 @@ def test_vendored_runners_resolve_default_roots_and_commands(tmp_path: Path) -> 
     assert nnunet_train["command"][:3] == [sys.executable, "-m", "nnunetv2.run.run_training"]
     assert "nnUNetTrainerSegMoELayer1" in nnunet_train["command"]
     assert "--npz" in nnunet_train["command"]
+    nnunet_layer2_train = nnunet.train_fold(
+        0,
+        TaskSpec.lesion(),
+        [case],
+        {"dataset_id": 503, "trainer": "nnUNetTrainerSegMoELayer2", "dry_run": True},
+    )
+    assert "nnUNetTrainerSegMoELayer2" in nnunet_layer2_train["command"]
     nnunet_predict = nnunet.predict_fold(
         0,
         "val_0",
@@ -89,6 +96,13 @@ def test_vendored_runners_resolve_default_roots_and_commands(tmp_path: Path) -> 
         "nnUNetTrainerV2_MedNeXt_S_kernel3_SegMoELayer1",
         "502",
     ]
+    mednext_layer2_train = mednext.train_fold(
+        0,
+        TaskSpec.lesion(),
+        [case],
+        {"task_id": 503, "trainer": "nnUNetTrainerV2_MedNeXt_S_kernel3_SegMoELayer2", "dry_run": True},
+    )
+    assert "nnUNetTrainerV2_MedNeXt_S_kernel3_SegMoELayer2" in mednext_layer2_train["command"]
     mednext_env = mednext._env({})
     assert "nnUNet_raw_data_base" in mednext_env
     assert str(mednext.repo_root) in mednext_env["PYTHONPATH"]
@@ -105,6 +119,15 @@ def test_vendored_runners_resolve_default_roots_and_commands(tmp_path: Path) -> 
     )
     assert segmamba_train["command"][:4] == [sys.executable, "-m", "segmoe_v2.segmamba_adapter", "train"]
     assert "--config" in segmamba_train["command"]
+    layer2_config_path = tmp_path / "segmamba_layer2_config.json"
+    layer2_config_path.write_text('{"stage": "layer2"}', encoding="utf-8")
+    segmamba_layer2_train = segmamba.train_fold(
+        0,
+        TaskSpec.lesion(),
+        [case],
+        {"dry_run": True, "config": layer2_config_path},
+    )
+    assert str(layer2_config_path) in segmamba_layer2_train["command"]
     segmamba_env = segmamba._env(0, "train", {})
     assert str(segmamba.repo_root / "mamba") in segmamba_env["PYTHONPATH"]
     assert str(segmamba.repo_root / "causal-conv1d") in segmamba_env["PYTHONPATH"]

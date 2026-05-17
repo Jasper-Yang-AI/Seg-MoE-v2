@@ -82,6 +82,7 @@ class NnUNetResEncRunner(BaseRunner):
             "trainer",
             "nnUNetTrainerSegMoEAnatomy" if task_spec.name == "anatomy" else "nnUNetTrainerSegMoELayer1",
         )
+        stage = str(experiment_cfg.get("stage", "layer2" if "Layer2" in str(trainer) else "layer1"))
         plans = experiment_cfg.get("plans", "nnUNetResEncUNetMPlans")
         if task_spec.name == "anatomy":
             command = [
@@ -142,6 +143,7 @@ class NnUNetResEncRunner(BaseRunner):
         return [
             {
                 "case_id": case.case_id,
+                "stage": stage,
                 "fold": int(fold),
                 "split": str(split_name),
                 "channel_names": ("P_lesion",),
