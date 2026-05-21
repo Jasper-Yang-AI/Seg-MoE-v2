@@ -215,6 +215,22 @@ def _collate(batch: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _pad_tensor_spatial_to_multiple(tensor: Any, multiple: int) -> tuple[Any, tuple[int, int, int]]:
+    import torch.nn.functional as F
+
+    original_shape = tuple(int(v) for v in tensor.shape[-3:])
+    pads = [((int(v) + int(multiple) - 1) // int(multiple)) * int(multiple) - int(v) for v in original_shape]
+    if not any(pads):
+        return tensor, original_shape
+    padded = F.pad(tensor, (0, pads[2], 0, pads[1], 0, pads[0]), mode="replicate")
+    return padded, original_shape
+
+
+def _crop_tensor_spatial(tensor: Any, shape_zyx: Sequence[int]) -> Any:
+    z, y, x = (int(v) for v in shape_zyx)
+    return tensor[..., :z, :y, :x]
+
+
 def _save_state_and_delete_last(model: Any, save_path: str | Path, *, delete_symbol: str | None = None) -> None:
     import torch
 
@@ -723,9 +739,11 @@ def predict(
     with torch.no_grad():
         for batch in loader:
             data = batch["data"].to(device)
+            data, original_shape = _pad_tensor_spatial_to_multiple(data, multiple=32)
             logits = model(data)
             if logits.ndim == 4:
                 logits = logits[:, None]
+            logits = _crop_tensor_spatial(logits, original_shape)
             logits_np = logits.detach().cpu().numpy()[0].astype(np.float32)
             target_np = batch["target"].numpy()[0]
             record = batch["record"][0]
