@@ -353,3 +353,10 @@ class nnUNetTrainerSegMoELayer2(nnUNetTrainerSegMoELayer1):
 
     def _tp_fp_fn_tn(self, logits: torch.Tensor, raw_target: torch.Tensor):
         return layer2_tp_fp_fn_tn(logits, raw_target)
+
+
+class nnUNetTrainerSegMoELayer2HN4(nnUNetTrainerSegMoELayer2):
+    """Layer2 variant with stronger NCA/FP hard-negative weighting."""
+
+    source_weights = {1: 1.25, 2: 4.0}
+    training_metadata = {"hard_negative_training": True, "hard_negative_weight": 4.0}
